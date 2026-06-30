@@ -4,7 +4,7 @@
   "description": "Помощник тимлида: подсчёты и аналитика по Jira прямо в браузере.",
   "private": true,
   "license": "MIT",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "engines": {
     "node": ">=20"
