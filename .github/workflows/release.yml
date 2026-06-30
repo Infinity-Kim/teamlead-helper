@@ -1,0 +1,62 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # нужно для создания GitHub Release
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build · zip · publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node (Yarn 4 via Corepack)
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: yarn
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      # Версия в manifest/zip должна совпадать с тегом: vX.Y.Z → X.Y.Z.
+      # Падаем, если package.json рассинхронизирован с тегом — иначе релиз
+      # выложит zip с чужой версией внутри.
+      - name: Verify package.json version matches tag
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          echo "tag=$TAG pkg=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v$TAG не совпадает с package.json version $PKG. Обнови package.json и пересоздай тег."
+            exit 1
+          fi
+
+      - name: Build & zip (Chrome)
+        run: yarn zip
+
+      - name: Locate zip
+        id: zip
+        run: echo "path=$(ls .output/*-chrome.zip)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          files: ${{ steps.zip.outputs.path }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true

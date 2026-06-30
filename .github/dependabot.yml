@@ -1,0 +1,44 @@
+version: 2
+updates:
+  # npm/Yarn-зависимости. Dependabot понимает yarn.lock (Yarn Berry).
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      # Minor/patch — одним PR, чтобы не плодить шум.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # Major-апгрейды фреймворков ломают сборку — обновляем вручную, осознанно.
+      - dependency-name: wxt
+        update-types: [version-update:semver-major]
+      - dependency-name: vue
+        update-types: [version-update:semver-major]
+      - dependency-name: tailwindcss
+        update-types: [version-update:semver-major]
+
+  # Версии GitHub Actions в workflow-файлах.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci(deps)
+    groups:
+      actions:
+        patterns:
+          - '*'
