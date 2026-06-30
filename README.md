@@ -1,5 +1,8 @@
 # Team Lead Helper
 
+[![CI](https://github.com/Infinity-Kim/teamlead-helper/actions/workflows/ci.yml/badge.svg)](https://github.com/Infinity-Kim/teamlead-helper/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 Chrome-расширение (MV3) — помощник тимлида. Накладывает на backlog **любой** Jira-доски
 аналитику capacity прямо под заголовком каждого спринта: распределение story points по
 capacity-бакетам, квартальный баланс и рекомендуемую ёмкость спринта по медиане velocity.
