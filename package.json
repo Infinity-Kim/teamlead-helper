@@ -1,0 +1,58 @@
+{
+  "name": "teamlead-helper",
+  "displayName": "Team Lead Helper",
+  "description": "Помощник тимлида: подсчёты и аналитика по Jira прямо в браузере.",
+  "private": true,
+  "license": "MIT",
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build",
+    "build:firefox": "wxt build -b firefox",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "compile": "vue-tsc --noEmit",
+    "typecheck": "vue-tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "e2e": "wxt build && node e2e/cap-widget.spec.mjs",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "vue": "^3.5.39"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "@playwright/test": "^1.61.1",
+    "@tailwindcss/vite": "^4.1.11",
+    "@vue/eslint-config-prettier": "^10.2.0",
+    "@vue/eslint-config-typescript": "^14.6.0",
+    "@wxt-dev/auto-icons": "^1.0.2",
+    "@wxt-dev/module-vue": "^1.0.3",
+    "eslint": "^9.30.0",
+    "eslint-plugin-vue": "^10.2.0",
+    "playwright": "^1.61.1",
+    "prettier": "^3.6.2",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.35.0",
+    "vite": "^8.1.0",
+    "vitest": "^3.2.4",
+    "vue-eslint-parser": "^10.1.4",
+    "vue-tsc": "^3.3.5",
+    "wxt": "^0.20.27"
+  },
+  "resolutions": {
+    "vite": "^8.1.0"
+  },
+  "packageManager": "yarn@4.17.0+sha512.c2957de2f9025ab14d63b24d0d8be1f1655810e22c341042c27f7ecd017b180ec12db73d69ac366d71b304ef9f069349ce462de96f04f8f1da317f4f762c95ae"
+}

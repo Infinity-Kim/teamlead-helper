@@ -1,0 +1,20 @@
+@import 'tailwindcss';
+
+/*
+ * Tailwind v4 внутри Shadow DOM (content script на Jira).
+ *
+ * Проблема: внутри shadow root единица `rem` наследует font-size ХОСТ-страницы,
+ * поэтому отступы/шрифты Tailwind "плывут" в зависимости от темы Jira.
+ * Фиксируем стабильную базу — тогда rem-утилиты считаются от 16px независимо от хоста.
+ */
+:host {
+  font-size: 16px;
+  line-height: 1.5;
+}
+
+/* Тёмная тема по системной настройке для popup/options/sidepanel. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+  }
+}
