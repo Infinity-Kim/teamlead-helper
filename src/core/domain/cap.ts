@@ -47,6 +47,10 @@ export interface BacklogIssue {
   sprintIds: number[];
   /** Уровень иерархии: 0 = задача верхнего уровня (Story/Bug/…), >0 = подзадача. */
   hierarchyLevel: number;
+  /** Имя текущего статуса (напр. "DEV", "Тестирование"). Из backlog/data. */
+  statusName: string;
+  /** Категория статуса: 'new' | 'indeterminate' | 'done' (для WIP-подсчёта). */
+  statusCategory: 'new' | 'indeterminate' | 'done' | 'unknown';
 }
 
 /** Спринт. */

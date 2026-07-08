@@ -5,6 +5,7 @@ import {
   sprintHistoryCount,
   quarterTarget,
   quarterUiMode,
+  statusConfig,
   type QuarterUiMode,
 } from '@/shared/storage';
 import type { CapTargets } from '@/core/domain';
@@ -14,7 +15,18 @@ const historyN = ref(6);
 const qProduct = ref(67);
 const qBand = ref(5);
 const qMode = ref<QuarterUiMode>('topBoard');
+// Статусы для Work Item Age (в UI — строкой через запятую; в хранилище — массивы).
+const workStatuses = ref('');
+const doneStatuses = ref('');
 const saved = ref(false);
+
+/** Строка «A, B, C» → массив без пустых/пробелов. */
+function parseStatuses(s: string): string[] {
+  return s
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
 
 const sum = computed(
   () => +(targets.value.Product + targets.value.Tech + targets.value.Support).toFixed(1),
@@ -34,6 +46,9 @@ onMounted(async () => {
   qProduct.value = qt.productPct;
   qBand.value = qt.bandPp;
   qMode.value = await quarterUiMode.getValue();
+  const sc = await statusConfig.getValue();
+  workStatuses.value = sc.workStatuses.join(', ');
+  doneStatuses.value = sc.doneStatuses.join(', ');
 });
 
 async function save() {
@@ -42,6 +57,10 @@ async function save() {
   await sprintHistoryCount.setValue(Math.max(1, Math.round(historyN.value)));
   await quarterTarget.setValue({ productPct: qProduct.value, bandPp: qBand.value });
   await quarterUiMode.setValue(qMode.value);
+  await statusConfig.setValue({
+    workStatuses: parseStatuses(workStatuses.value),
+    doneStatuses: parseStatuses(doneStatuses.value),
+  });
   saved.value = true;
   setTimeout(() => (saved.value = false), 2000);
 }
@@ -111,7 +130,7 @@ async function save() {
         </p>
 
         <label class="block border-t border-slate-200 pt-4 dark:border-slate-800">
-          <span class="mb-1 block text-sm font-medium">Спринтов для медианы velocity</span>
+          <span class="mb-1 block text-sm font-medium">Спринтов истории для расчётов</span>
           <input
             v-model.number="historyN"
             type="number"
@@ -120,8 +139,8 @@ async function save() {
             class="w-24 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
           />
           <span class="mt-1 block text-xs text-slate-400">
-            Сколько последних закрытых спринтов брать для медианы выполненных SP (рекомендуемый
-            предел на полосе).
+            Сколько последних закрытых спринтов брать для медианы velocity, трендов (throughput,
+            say/do, carryover), прогноза Monte Carlo и порогов возраста задач.
           </span>
         </label>
 
@@ -172,8 +191,44 @@ async function save() {
           </label>
         </div>
 
+        <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
+          <h2 class="mb-1 text-sm font-semibold">Возраст задач (Work Item Age)</h2>
+          <p class="mb-3 text-xs text-slate-400">
+            Задачи, которые давно «в работе», подсвечиваются на доске. Возраст считается с момента
+            входа в один из статусов «в работе». Пороги («стареет» / «застряла») берутся из истории
+            команды автоматически. Статусы — через запятую, регистр не важен.
+          </p>
+          <label class="block">
+            <span class="mb-1 block text-xs font-medium">Статусы «в работе» (старт возраста)</span>
+            <input
+              v-model="workStatuses"
+              type="text"
+              placeholder="DEV, В работе, In Progress"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+            <span class="mt-1 block text-xs text-slate-400">
+              Первый вход в любой из этих статусов = начало работы. Очередь на разработку (напр.
+              «Ready for DEV») сюда НЕ включать — иначе возраст раздуется ожиданием.
+            </span>
+          </label>
+          <label class="mt-3 block">
+            <span class="mb-1 block text-xs font-medium">Статусы «завершено»</span>
+            <input
+              v-model="doneStatuses"
+              type="text"
+              placeholder="Готово, Done, Closed"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+            <span class="mt-1 block text-xs text-slate-400">
+              Для расчёта времени цикла (start → done) по закрытым задачам — от него зависят пороги
+              возраста.
+            </span>
+          </label>
+        </div>
+
         <p class="border-t border-slate-200 pt-4 text-xs text-slate-400 dark:border-slate-800">
-          Виджет работает на любой доске автоматически — настройки применяются ко всем.
+          Виджет работает на любой доске автоматически — настройки применяются ко всем. Статусы по
+          умолчанию настроены под доску ELCAS; для другой доски укажите её названия статусов.
         </p>
 
         <div class="flex items-center gap-3 pt-1">

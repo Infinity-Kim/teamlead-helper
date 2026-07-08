@@ -10,6 +10,8 @@ const issue = (p: Partial<BacklogIssue>): BacklogIssue => ({
   capBuckets: p.capBuckets ?? [],
   sprintIds: p.sprintIds ?? [],
   hierarchyLevel: p.hierarchyLevel ?? 0,
+  statusName: p.statusName ?? '',
+  statusCategory: p.statusCategory ?? 'unknown',
 });
 
 describe('issuesOfSprint', () => {
