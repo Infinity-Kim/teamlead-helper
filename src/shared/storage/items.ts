@@ -54,3 +54,19 @@ export type ThemePreference = 'system' | 'light' | 'dark';
 export const themePreference = storage.defineItem<ThemePreference>('sync:themePreference', {
   fallback: 'system',
 });
+
+/**
+ * Статусы «реальной работы» и «завершено» для Work Item Age / cycle time.
+ * Возраст считается от ПЕРВОГО входа в workStatuses (очередь типа Ready for DEV НЕ входит).
+ * Дефолт — под ELCAS доску 80 (recon 2026-07-08; смешаны рус/англ имена статусов).
+ */
+export interface StatusConfig {
+  workStatuses: string[];
+  doneStatuses: string[];
+}
+export const statusConfig = storage.defineItem<StatusConfig>('sync:statusConfig', {
+  fallback: {
+    workStatuses: ['DEV', 'В работе', 'In Progress', 'In Development'],
+    doneStatuses: ['Готово', 'Done', 'DoD/Release', 'Closed'],
+  },
+});

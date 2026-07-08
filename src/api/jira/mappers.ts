@@ -1,5 +1,6 @@
 import { CAP_LABEL_TO_BUCKET, type BacklogIssue, type Sprint } from '@/core/domain';
-import type { GhBacklogIssueDto, GhSprintDto } from './dto';
+import type { StatusTransition } from '@/core/metrics';
+import type { GhBacklogIssueDto, GhIssueChangelogDto, GhSprintDto } from './dto';
 
 /**
  * Маппинг сырых greenhopper-DTO → domain. ЧИСТЫЕ функции (тестируются без браузера).
@@ -24,6 +25,11 @@ export function extractStoryPoints(dto: GhBacklogIssueDto): number {
   return typeof v === 'number' ? v : 0;
 }
 
+/** Категория статуса Jira → доменный union (неизвестное → 'unknown'). */
+function normalizeStatusCategory(key: string | undefined): BacklogIssue['statusCategory'] {
+  return key === 'new' || key === 'indeterminate' || key === 'done' ? key : 'unknown';
+}
+
 export function mapIssue(dto: GhBacklogIssueDto): BacklogIssue {
   return {
     id: dto.id,
@@ -32,7 +38,19 @@ export function mapIssue(dto: GhBacklogIssueDto): BacklogIssue {
     capBuckets: labelsToBuckets(dto.labels),
     sprintIds: dto.sprintIds ?? [],
     hierarchyLevel: dto.typeHierarchyLevel,
+    statusName: dto.statusName ?? '',
+    statusCategory: normalizeStatusCategory(dto.status?.statusCategory?.key),
   };
+}
+
+/** Извлечь переходы статусов из changelog (только field==="status"), для age/cycle time. */
+export function extractStatusTransitions(dto: GhIssueChangelogDto): StatusTransition[] {
+  const histories = dto.changelog?.histories ?? [];
+  return histories.flatMap((h) =>
+    (h.items ?? [])
+      .filter((it) => it.field === 'status' && typeof it.toString === 'string')
+      .map((it) => ({ at: h.created, to: it.toString as string })),
+  );
 }
 
 /** Сырой Jira-state спринта → доменный union. Неизвестное → FUTURE (консервативно: не активен). */

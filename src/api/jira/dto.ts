@@ -18,6 +18,8 @@ export interface GhBacklogIssueDto {
   estimateStatistic?: GhEstimateStatistic;
   summary?: string;
   done?: boolean;
+  statusName?: string; // напр. "DEV", "Тестирование"
+  status?: { statusCategory?: { key?: string } }; // key: new|indeterminate|done
 }
 
 export interface GhSprintDto {
@@ -57,6 +59,23 @@ export interface GhReportIssue {
   labels?: string[];
   currentEstimateStatistic?: GhEstimateStatistic;
   estimateStatistic?: GhEstimateStatistic;
+}
+
+// --- Changelog задачи (переходы статусов) для Work Item Age / cycle time ---
+
+/** Ответ /rest/api/3/issue/<KEY>?expand=changelog&fields=status,created. */
+export interface GhIssueChangelogDto {
+  fields?: {
+    created?: string;
+    status?: { name?: string; statusCategory?: { key?: string } };
+  };
+  changelog?: {
+    total?: number;
+    histories?: Array<{
+      created: string; // момент изменения
+      items?: Array<{ field: string; fromString?: string; toString?: string }>;
+    }>;
+  };
 }
 
 /** Ответ /rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=&sprintId=. */
