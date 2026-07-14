@@ -6,6 +6,7 @@ import {
   quarterTarget,
   quarterUiMode,
   statusConfig,
+  jiraCreds,
   type QuarterUiMode,
 } from '@/shared/storage';
 import type { CapTargets } from '@/core/domain';
@@ -18,6 +19,10 @@ const qMode = ref<QuarterUiMode>('topBoard');
 // Статусы для Work Item Age (в UI — строкой через запятую; в хранилище — массивы).
 const workStatuses = ref('');
 const doneStatuses = ref('');
+// Jira API для страницы отчёта по спринтам (Basic auth: email + токен).
+const jiraBaseUrl = ref('https://tvbet.atlassian.net');
+const jiraEmail = ref('');
+const jiraToken = ref('');
 const saved = ref(false);
 
 /** Строка «A, B, C» → массив без пустых/пробелов. */
@@ -49,6 +54,12 @@ onMounted(async () => {
   const sc = await statusConfig.getValue();
   workStatuses.value = sc.workStatuses.join(', ');
   doneStatuses.value = sc.doneStatuses.join(', ');
+  const creds = await jiraCreds.getValue();
+  if (creds) {
+    jiraBaseUrl.value = creds.baseUrl;
+    jiraEmail.value = creds.email;
+    jiraToken.value = creds.apiToken;
+  }
 });
 
 async function save() {
@@ -61,6 +72,14 @@ async function save() {
     workStatuses: parseStatuses(workStatuses.value),
     doneStatuses: parseStatuses(doneStatuses.value),
   });
+  // Jira-креды: сохраняем только если заполнены email и токен.
+  if (jiraEmail.value.trim() && jiraToken.value.trim()) {
+    await jiraCreds.setValue({
+      baseUrl: jiraBaseUrl.value.trim().replace(/\/$/, ''),
+      email: jiraEmail.value.trim(),
+      apiToken: jiraToken.value.trim(),
+    });
+  }
   saved.value = true;
   setTimeout(() => (saved.value = false), 2000);
 }
@@ -222,6 +241,49 @@ async function save() {
             <span class="mt-1 block text-xs text-slate-400">
               Для расчёта времени цикла (start → done) по закрытым задачам — от него зависят пороги
               возраста.
+            </span>
+          </label>
+        </div>
+
+        <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
+          <h2 class="mb-1 text-sm font-semibold">Доступ к Jira (отчёт по спринтам)</h2>
+          <p class="mb-3 text-xs text-slate-400">
+            Нужен для отдельной страницы «Отчёт по спринтам» (по кнопке в popup). Используется
+            Basic-авторизация: рабочий email + персональный API-токен Atlassian. Токен создаётся в
+            <span class="font-mono">id.atlassian.com → Security → API tokens</span> и хранится только
+            локально в браузере (не синхронизируется, не отправляется никуда, кроме самой Jira).
+          </p>
+          <label class="block">
+            <span class="mb-1 block text-xs font-medium">Base URL</span>
+            <input
+              v-model="jiraBaseUrl"
+              type="url"
+              placeholder="https://tvbet.atlassian.net"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+          </label>
+          <label class="mt-3 block">
+            <span class="mb-1 block text-xs font-medium">Email</span>
+            <input
+              v-model="jiraEmail"
+              type="email"
+              autocomplete="username"
+              placeholder="name@tvbet.tv"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+          </label>
+          <label class="mt-3 block">
+            <span class="mb-1 block text-xs font-medium">API-токен</span>
+            <input
+              v-model="jiraToken"
+              type="password"
+              autocomplete="new-password"
+              placeholder="••••••••••••"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+            <span class="mt-1 block text-xs text-slate-400">
+              Сохраняется, только если заполнены и email, и токен. Токен можно отозвать в любой момент
+              в настройках Atlassian.
             </span>
           </label>
         </div>

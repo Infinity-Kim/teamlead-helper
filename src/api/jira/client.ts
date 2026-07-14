@@ -1,18 +1,48 @@
 import { JiraRequestError } from './errors';
 
 /**
- * Низкоуровневый fetch к Jira через сессию браузера (credentials:'include').
- * Работает в content script на странице Jira: относительный путь /rest/... резолвится к Jira сам,
- * куки SSO-сессии применяются автоматически, токен не нужен. Слой: api/jira.
+ * Учётные данные для прямого API-доступа (Basic auth) со страницы расширения.
+ * Если заданы — fetch идёт на абсолютный `baseUrl` + заголовок Authorization (email:token),
+ * что обходит SameSite-cookie ограничение extension-origin. Если null — старый режим:
+ * относительный путь + credentials:'include' (работает в content-script на странице Jira).
+ */
+export interface JiraAuth {
+  baseUrl: string;
+  email: string;
+  apiToken: string;
+}
+
+/** Активные креды процесса. Устанавливаются один раз при старте страницы (setJiraAuth). */
+let activeAuth: JiraAuth | null = null;
+
+/** Задать креды для прямого API-доступа (вызывать на extension-странице до запросов). */
+export function setJiraAuth(auth: JiraAuth | null): void {
+  activeAuth = auth;
+}
+
+/** Собрать (url, headers) под текущий режим: Basic-auth абсолютный ИЛИ куки относительный. */
+function buildRequest(path: string): { url: string; headers: HeadersInit; credentials: RequestCredentials } {
+  if (activeAuth) {
+    const token = btoa(`${activeAuth.email}:${activeAuth.apiToken}`);
+    return {
+      url: `${activeAuth.baseUrl.replace(/\/$/, '')}${path}`,
+      headers: { Accept: 'application/json', Authorization: `Basic ${token}` },
+      credentials: 'omit',
+    };
+  }
+  return { url: path, headers: { Accept: 'application/json' }, credentials: 'include' };
+}
+
+/**
+ * Низкоуровневый fetch к Jira. Два режима: (1) Basic-auth (email+token, абсолютный URL) — со
+ * страницы расширения; (2) сессия браузера (credentials:'include', относительный путь) — в
+ * content-script на странице Jira, куки SSO. Режим выбирается наличием setJiraAuth. Слой: api/jira.
  */
 export async function jiraGetJson<T>(path: string): Promise<T> {
+  const { url, headers, credentials } = buildRequest(path);
   let res: Response;
   try {
-    res = await fetch(path, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      credentials: 'include',
-    });
+    res = await fetch(url, { method: 'GET', headers, credentials });
   } catch (e) {
     throw new JiraRequestError({ kind: 'network', message: String(e) });
   }

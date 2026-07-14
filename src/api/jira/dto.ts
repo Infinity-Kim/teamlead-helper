@@ -59,6 +59,10 @@ export interface GhReportIssue {
   labels?: string[];
   currentEstimateStatistic?: GhEstimateStatistic;
   estimateStatistic?: GhEstimateStatistic;
+  // Поля ниже Jira отдаёт в sprintreport — нужны для страницы «задачи спринта».
+  summary?: string;
+  statusName?: string; // текущий статус, напр. "Готово", "Отменено"
+  typeName?: string; // тип задачи, напр. "История", "Spike"
 }
 
 // --- Changelog задачи (переходы статусов) для Work Item Age / cycle time ---
@@ -81,7 +85,8 @@ export interface GhIssueChangelogDto {
 /** Ответ /rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=&sprintId=. */
 export interface GhSprintReportDto {
   contents: {
-    completedIssuesEstimateSum: GhEstimateSum; // completed SP (для velocity)
+    completedIssuesEstimateSum: GhEstimateSum; // completed SP на закрытии (current) — green bar Jira
+    completedIssuesInitialEstimateSum?: GhEstimateSum; // completed SP на старте (initial) — оценка при коммите
     allIssuesEstimateSum?: GhEstimateSum; // весь объём (committed)
     completedIssues?: GhReportIssue[]; // Done-задачи — для факта по CAP-бакетам
     issuesNotCompletedInCurrentSprint?: GhReportIssue[]; // взятые, но не Done — для плана
