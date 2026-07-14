@@ -1,6 +1,18 @@
-import { CAP_LABEL_TO_BUCKET, type BacklogIssue, type Sprint } from '@/core/domain';
+import {
+  CAP_LABEL_TO_BUCKET,
+  type BacklogIssue,
+  type Sprint,
+  type SprintReportIssue,
+  type SprintReportDetail,
+} from '@/core/domain';
 import type { StatusTransition } from '@/core/metrics';
-import type { GhBacklogIssueDto, GhIssueChangelogDto, GhSprintDto } from './dto';
+import type {
+  GhBacklogIssueDto,
+  GhIssueChangelogDto,
+  GhSprintDto,
+  GhReportIssue,
+  GhSprintReportDto,
+} from './dto';
 
 /**
  * Маппинг сырых greenhopper-DTO → domain. ЧИСТЫЕ функции (тестируются без браузера).
@@ -65,5 +77,41 @@ export function mapSprint(dto: GhSprintDto): Sprint {
     state: normalizeSprintState(dto.state),
     startDate: dto.startDate,
     endDate: dto.endDate,
+  };
+}
+
+/**
+ * Задача отчёта спринта → доменная SprintReportIssue.
+ * SP берём с currentEstimateStatistic (на закрытии) — совпадает с green bar Jira;
+ * fallback на estimateStatistic. null, если оценка не проставлена (не 0 — важно отличать).
+ */
+export function mapReportIssue(dto: GhReportIssue): SprintReportIssue {
+  const raw =
+    dto.currentEstimateStatistic?.statFieldValue?.value ??
+    dto.estimateStatistic?.statFieldValue?.value;
+  return {
+    key: dto.key,
+    summary: dto.summary ?? '',
+    points: typeof raw === 'number' ? raw : null,
+    status: dto.statusName ?? '',
+    type: dto.typeName ?? '',
+    labels: dto.labels ?? [],
+  };
+}
+
+/** Отчёт спринта (contents + sprint) → доменный SprintReportDetail. */
+export function mapSprintReportDetail(dto: GhSprintReportDto): SprintReportDetail {
+  const c = dto.contents;
+  return {
+    sprintId: dto.sprint.id,
+    name: dto.sprint.name,
+    state: dto.sprint.state,
+    isoStartDate: dto.sprint.isoStartDate,
+    isoCompleteDate: dto.sprint.isoCompleteDate,
+    completedPoints: c.completedIssuesEstimateSum?.value ?? 0,
+    completedInitialPoints: c.completedIssuesInitialEstimateSum?.value ?? 0,
+    notCompletedPoints: 0, // заполняется из отдельного поля, если появится; carryover по issues ниже
+    completedIssues: (c.completedIssues ?? []).map(mapReportIssue),
+    notCompletedIssues: (c.issuesNotCompletedInCurrentSprint ?? []).map(mapReportIssue),
   };
 }

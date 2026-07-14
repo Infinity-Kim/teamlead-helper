@@ -21,6 +21,12 @@ async function openSidePanel() {
 function openOptions() {
   browser.runtime.openOptionsPage();
 }
+
+/** Открыть страницу отчёта по спринтам в новой вкладке. */
+function openSprintReport() {
+  browser.tabs.create({ url: browser.runtime.getURL('/sprint-report.html') });
+  window.close();
+}
 </script>
 
 <template>
@@ -46,6 +52,13 @@ function openOptions() {
         @click="openSidePanel"
       >
         Открыть панель
+      </button>
+      <button
+        type="button"
+        class="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+        @click="openSprintReport"
+      >
+        Отчёт по спринтам
       </button>
       <button
         type="button"

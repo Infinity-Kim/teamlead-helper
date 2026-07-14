@@ -1,5 +1,5 @@
 import { storage } from 'wxt/utils/storage';
-import { DEFAULT_CAP_TARGETS, type CapTargets } from '@/core/domain';
+import { DEFAULT_CAP_TARGETS, type CapTargets, type SprintReportDetail } from '@/core/domain';
 
 /**
  * Типобезопасный слой хранилища расширения — ЕДИНЫЙ источник истины для persisted-state.
@@ -28,6 +28,47 @@ export interface BoardConfig {
 export const boardConfig = storage.defineItem<BoardConfig>('sync:boardConfig', {
   fallback: { rapidViewId: 80 },
 });
+
+/**
+ * Учётные данные Jira для прямого API-доступа со страницы расширения (Basic auth:
+ * email + API-token). Позволяет fetch к Jira с extension-origin, минуя SameSite-cookie
+ * ограничение (не нужен content-script/открытая вкладка Jira). Токен создаётся на
+ * id.atlassian.com/manage-profile/security/api-tokens. local: — не синхронизируем секрет.
+ * ПУСТО по умолчанию — вводится в options. НИКОГДА не хардкодить в код.
+ */
+export interface JiraCreds {
+  baseUrl: string; // https://tvbet.atlassian.net
+  email: string;
+  apiToken: string;
+}
+export const jiraCreds = storage.defineItem<JiraCreds | null>('local:jiraCreds', {
+  fallback: null,
+});
+
+/** Доски команд для sprint-отчёта (El Casino / POC / Web). Порядок = порядок в UI. */
+export const TEAM_BOARDS: ReadonlyArray<{ team: string; rapidViewId: number }> = [
+  { team: 'El Casino', rapidViewId: 80 },
+  { team: 'POC', rapidViewId: 1178 },
+  { team: 'Web', rapidViewId: 16 },
+];
+
+/**
+ * Кэш детальных sprint-отчётов по командам (для страницы sprint-report).
+ * local: — данные объёмные (списки задач), не для sync. Пишет content-script на Jira
+ * (там куки сессии работают), читает страница sprint-report. `updatedAt` — свежесть кэша.
+ */
+export interface SprintReportsCache {
+  updatedAt: number; // Date.now()
+  boards: Array<{
+    team: string;
+    rapidViewId: number;
+    sprints: SprintReportDetail[];
+  }>;
+}
+export const sprintReportsCache = storage.defineItem<SprintReportsCache | null>(
+  'local:sprintReportsCache',
+  { fallback: null },
+);
 
 /** Сколько последних закрытых спринтов брать для медианы velocity (рекомендуемый capacity). */
 export const sprintHistoryCount = storage.defineItem<number>('sync:sprintHistoryCount', {

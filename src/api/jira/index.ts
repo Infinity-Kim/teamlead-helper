@@ -1,4 +1,9 @@
-import type { BoardBacklog, SprintOutcome, SprintRecord } from '@/core/domain';
+import type {
+  BoardBacklog,
+  SprintOutcome,
+  SprintRecord,
+  SprintReportDetail,
+} from '@/core/domain';
 import {
   splitPointsByBucket,
   firstWorkStart,
@@ -20,6 +25,7 @@ import {
   labelsToBuckets,
   normalizeSprintState,
   extractStatusTransitions,
+  mapSprintReportDetail,
 } from './mappers';
 
 type GhSprint = GhSprintQueryDto['sprints'][number];
@@ -255,5 +261,49 @@ function bucketizeReport(issues: GhSprintReportDto['contents']['completedIssues'
   );
 }
 
+/**
+ * Детальные отчёты последних `lastN` ЗАКРЫТЫХ спринтов доски — для страницы sprint-отчёта.
+ * Каждый спринт: completed SP (current = green bar) + список completed/carryover задач
+ * с summary/status/type. Источник — Jira Sprint Report (данные точные, как в retrospective).
+ * Deep module: наружу domain SprintReportDetail[], внутри спрятан greenhopper.
+ */
+export async function getBoardSprintReports(
+  rapidViewId: number,
+  lastN: number,
+): Promise<SprintReportDetail[]> {
+  const reports = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  return reports.map(({ report }) => mapSprintReportDetail(report));
+}
+
+/**
+ * ВСЕ закрытые спринты доски со стартом ≥ `sinceIso` (без обрезки до N) — для страницы
+ * «Отчёт по спринтам» с квартальной группировкой. Порядок: от свежих к старым (по sequence).
+ * Фильтр по дате — на domain-объекте (isoStartDate), т.к. sprintquery дат не отдаёт, они
+ * приходят в sprintreport. Спринт без валидной isoStartDate отбрасывается (нельзя отнести к кварталу).
+ *
+ * N+1 запросов (по sprintreport на каждый закрытый спринт) — на реальной доске это десятки
+ * параллельных запросов; jiraGetJsonRetry страхует от спорадических отказов Jira.
+ */
+export async function getBoardSprintReportsSince(
+  rapidViewId: number,
+  sinceIso: string,
+): Promise<SprintReportDetail[]> {
+  const since = Date.parse(sinceIso);
+  const reports = await fetchRecentSprintReports(
+    rapidViewId,
+    Number.MAX_SAFE_INTEGER,
+    (s) => s.state === 'CLOSED',
+  );
+  return reports
+    .map(({ report }) => mapSprintReportDetail(report))
+    .filter((d) => {
+      if (!d.isoStartDate) return false;
+      const t = Date.parse(d.isoStartDate);
+      return !Number.isNaN(t) && t >= since;
+    });
+}
+
+export { setJiraAuth } from './client';
+export type { JiraAuth } from './client';
 export { JiraRequestError } from './errors';
 export type { JiraError } from './errors';

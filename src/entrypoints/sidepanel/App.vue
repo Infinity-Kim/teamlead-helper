@@ -13,6 +13,9 @@ function openBoard() {
     url: `https://tvbet.atlassian.net/jira/software/c/projects/ELCAS/boards/${rapidViewId.value}/backlog`,
   });
 }
+function openSprintReport() {
+  void browser.tabs.create({ url: browser.runtime.getURL('/sprint-report.html') });
+}
 function openOptions() {
   browser.runtime.openOptionsPage();
 }
@@ -40,10 +43,25 @@ function openOptions() {
         </p>
       </section>
 
+      <section class="mt-4 rounded-lg border border-slate-200 p-4 dark:border-slate-800">
+        <h2 class="mb-1 text-sm font-medium">Отчёт по спринтам</h2>
+        <p class="text-sm text-slate-500 dark:text-slate-400">
+          Спринты команды с 2025 года по кварталам: velocity, распределение по CAP-бакетам (%/SP) и
+          клик-фильтр задач по бакету. Точные данные Jira Sprint Report.
+        </p>
+      </section>
+
       <div class="mt-4 flex flex-col gap-2">
         <button
           type="button"
           class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
+          @click="openSprintReport"
+        >
+          Отчёт по спринтам
+        </button>
+        <button
+          type="button"
+          class="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
           @click="openBoard"
         >
           Открыть доску ELCAS

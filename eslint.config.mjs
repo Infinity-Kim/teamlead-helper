@@ -52,6 +52,7 @@ export default defineConfigWithVueTs(
         fetch: 'readonly',
         URL: 'readonly',
         performance: 'readonly',
+        chrome: 'readonly',
       },
     },
   },
