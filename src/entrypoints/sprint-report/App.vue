@@ -1,7 +1,13 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue';
 import { getBoardSprintReportsSince, setJiraAuth, JiraRequestError } from '@/api/jira';
-import { jiraCreds, TEAM_BOARDS, boardConfig } from '@/shared/storage';
+import {
+  jiraCreds,
+  TEAM_BOARDS,
+  boardConfig,
+  sprintReportsCache,
+  type SprintReportsCache,
+} from '@/shared/storage';
 import type { SprintReportDetail, SprintReportIssue, CapSlice } from '@/core/domain';
 import {
   groupSprintsByQuarter,
@@ -22,14 +28,36 @@ import { BUCKET_COLORS } from '@/components/ads-tokens';
 const SINCE_ISO = '2025-10-01';
 /** Окно для average velocity. */
 const VELOCITY_WINDOW = 6;
+/** Свежесть кеша: старше — перезагружаем из сети (закрытые спринты меняются нечасто). */
+const CACHE_TTL_MS = 30 * 60 * 1000;
 
 /** Отчёт одной команды: сырьё + предрасчитанные агрегаты. */
 interface TeamReport {
   team: string;
   rapidViewId: number;
+  sprints: SprintReportDetail[];
   quarters: QuarterGroup[];
   velocity: VelocitySummary;
   sprintCount: number;
+  /** Сколько спринтов не загрузилось (частичные данные) — показываем плашку. */
+  failed: number;
+}
+
+/** Кеш готовых отчётов по команде В ПАМЯТИ страницы — мгновенное переключение между командами. */
+const memCache = new Map<number, TeamReport>();
+
+/** Собрать TeamReport из сырья спринтов. */
+function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number): TeamReport {
+  const meta = TEAM_BOARDS.find((b) => b.rapidViewId === rvid);
+  return {
+    team: meta?.team ?? `board ${rvid}`,
+    rapidViewId: rvid,
+    sprints,
+    quarters: groupSprintsByQuarter(sprints),
+    velocity: velocitySummary(sprints, VELOCITY_WINDOW),
+    sprintCount: sprints.length,
+    failed,
+  };
 }
 
 const loading = ref(true);
@@ -87,7 +115,48 @@ function visibleIssues(s: SprintReportDetail): SprintReportIssue[] {
   return s.completedIssues.filter((i) => issueInSlice(i, slice));
 }
 
-async function load() {
+/** Применить отчёт к UI: выставить report, раскрыть свежий квартал, сбросить фильтры. */
+function applyReport(r: TeamReport) {
+  report.value = r;
+  openQuarters.value = r.quarters[0] ? new Set([r.quarters[0].quarter]) : new Set();
+  openSprints.value = new Set();
+  sliceFilter.value = new Map();
+}
+
+/** Прочитать спринты команды из persist-кеша (chrome.storage), если он свежий (в пределах TTL). */
+async function readPersistCache(rvid: number): Promise<TeamReport | null> {
+  const cache = await sprintReportsCache.getValue();
+  if (!cache || Date.now() - cache.updatedAt > CACHE_TTL_MS) return null;
+  const board = cache.boards.find((b) => b.rapidViewId === rvid);
+  if (!board) return null;
+  return buildReport(rvid, board.sprints, 0);
+}
+
+/** Записать спринты команды в persist-кеш (обновив/добавив её запись, освежив updatedAt). */
+async function writePersistCache(rvid: number, team: string, sprints: SprintReportDetail[]) {
+  const prev = await sprintReportsCache.getValue();
+  const boards = (prev?.boards ?? []).filter((b) => b.rapidViewId !== rvid);
+  boards.push({ team, rapidViewId: rvid, sprints });
+  const next: SprintReportsCache = { updatedAt: Date.now(), boards };
+  await sprintReportsCache.setValue(next);
+}
+
+/**
+ * Загрузить отчёт выбранной команды. force=true (кнопка «Обновить») минует кеш.
+ * Порядок без force: память страницы → persist-кеш (TTL) → сеть. После сети — кладём в оба кеша.
+ */
+async function load(force = false) {
+  const rvid = selectedRvid.value;
+
+  // 1) Кеш в памяти страницы — мгновенно.
+  if (!force) {
+    const cached = memCache.get(rvid);
+    if (cached) {
+      applyReport(cached);
+      return;
+    }
+  }
+
   loading.value = true;
   error.value = null;
   try {
@@ -99,22 +168,23 @@ async function load() {
     }
     setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
 
-    const rvid = selectedRvid.value;
-    const meta = TEAM_BOARDS.find((b) => b.rapidViewId === rvid);
-    const sprints = await getBoardSprintReportsSince(rvid, SINCE_ISO);
-    report.value = {
-      team: meta?.team ?? `board ${rvid}`,
-      rapidViewId: rvid,
-      quarters: groupSprintsByQuarter(sprints),
-      velocity: velocitySummary(sprints, VELOCITY_WINDOW),
-      sprintCount: sprints.length,
-    };
-    // Свежий квартал раскрываем сразу, остальное свёрнуто; сбрасываем раскрытые спринты.
-    openQuarters.value = report.value.quarters[0]
-      ? new Set([report.value.quarters[0].quarter])
-      : new Set();
-    openSprints.value = new Set();
-    sliceFilter.value = new Map();
+    // 2) Persist-кеш (переживает закрытие вкладки), если свежий и не форсим.
+    if (!force) {
+      const persisted = await readPersistCache(rvid);
+      if (persisted) {
+        memCache.set(rvid, persisted);
+        applyReport(persisted);
+        return;
+      }
+    }
+
+    // 3) Сеть.
+    const { sprints, failed } = await getBoardSprintReportsSince(rvid, SINCE_ISO);
+    const built = buildReport(rvid, sprints, failed);
+    memCache.set(rvid, built);
+    // Persist только полные данные — частичные (failed>0) не кешируем, чтобы «Обновить» дотянул.
+    if (failed === 0) await writePersistCache(rvid, built.team, sprints);
+    applyReport(built);
   } catch (e) {
     error.value =
       e instanceof JiraRequestError && e.error.kind === 'unauthorized'
@@ -125,11 +195,17 @@ async function load() {
   }
 }
 
-/** Выбор команды в сегментированном контроле → перезагрузка отчёта (если сменилась). */
+/** Кнопка «Обновить» — форсированная перезагрузка текущей команды из сети. */
+function refresh() {
+  memCache.delete(selectedRvid.value);
+  void load(true);
+}
+
+/** Выбор команды в сегментированном контроле → загрузка отчёта (из кеша мгновенно или сеть). */
 function selectTeam(rvid: number) {
   if (loading.value || rvid === selectedRvid.value) return;
   selectedRvid.value = rvid;
-  load();
+  void load();
 }
 
 onMounted(async () => {
@@ -217,7 +293,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
         <button
           class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-800"
           :disabled="loading"
-          @click="load"
+          @click="refresh"
         >
           {{ loading ? 'Загрузка…' : '↻ Обновить' }}
         </button>
@@ -264,6 +340,25 @@ const CAP_SLICES_ALL = CAP_SLICES;
           <span class="inline-block size-2.5 rounded-sm" :style="{ background: sliceColor(slice) }" />
           {{ SLICE_LABEL[slice] }}
         </span>
+      </div>
+
+      <!-- Плашка частичных данных: часть спринтов не догрузилась (rate-limit/сеть) -->
+      <div
+        v-if="!loading && !error && report && report.failed > 0"
+        class="mb-4 flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+      >
+        <span class="flex-1">
+          Загружены не все спринты: {{ report.failed }}
+          {{ report.failed === 1 ? 'спринт не удалось' : 'спринтов не удалось' }} получить
+          (ограничение частоты запросов Jira). Квартальные цифры могут быть неполными.
+        </span>
+        <button
+          type="button"
+          class="shrink-0 rounded-md border border-amber-400 px-2.5 py-1 text-xs font-medium hover:bg-amber-100 dark:border-amber-700 dark:hover:bg-amber-900"
+          @click="refresh"
+        >
+          Повторить
+        </button>
       </div>
 
       <!-- Ошибка -->
