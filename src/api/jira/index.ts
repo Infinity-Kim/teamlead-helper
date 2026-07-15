@@ -3,6 +3,7 @@ import type {
   SprintOutcome,
   SprintRecord,
   SprintReportDetail,
+  SprintReportsResult,
 } from '@/core/domain';
 import {
   splitPointsByBucket,
@@ -17,7 +18,7 @@ import type {
   GhSprintQueryDto,
   GhSprintReportDto,
 } from './dto';
-import { jiraGetJson, jiraGetJsonRetry } from './client';
+import { jiraGetJson, jiraGetJsonRetry, mapWithConcurrency } from './client';
 import { endpoints } from './endpoints';
 import {
   mapIssue,
@@ -30,31 +31,45 @@ import {
 
 type GhSprint = GhSprintQueryDto['sprints'][number];
 
+/** Одновременных sprintreport-запросов. Ниже burst-лимита Jira (100 GET/с) с большим запасом. */
+const SPRINT_REPORT_CONCURRENCY = 5;
+
+/** Результат orchestration истории спринтов: успешно загруженные + сколько НЕ загрузилось. */
+interface SprintReportsFetch {
+  ok: Array<{ sprint: GhSprint; report: GhSprintReportDto }>;
+  /** Сколько отчётов не удалось получить даже после ретраев (частичные данные). */
+  failed: number;
+}
+
 /**
  * Общий orchestration N+1-запросов истории: sprintquery (список) → последние `limit` спринтов
- * по хронологии (`sequence`, НЕ id) → sprintreport каждого ПАРАЛЛЕЛЬНО (с ретраем; упавший — null).
- * Используют и velocity-медиана, и квартальный баланс — поэтому helper, а не копипаст.
+ * по хронологии (`sequence`, НЕ id) → sprintreport каждого через ПУЛ конкурентности (не Promise.all
+ * по всем — иначе десятки одновременных запросов пробивают burst-лимит Jira → 429 → спринты пропадают).
+ * Каждый запрос с ретраем (Retry-After + backoff). Упавшие НЕ теряются молча — считаются в `failed`.
+ * Используют и velocity-медиана, и квартальный баланс, и sprint-отчёт — поэтому helper, а не копипаст.
  */
 async function fetchRecentSprintReports(
   rapidViewId: number,
   limit: number,
   filter: (s: GhSprint) => boolean = () => true,
-): Promise<Array<{ sprint: GhSprint; report: GhSprintReportDto }>> {
+): Promise<SprintReportsFetch> {
   const query = await jiraGetJson<GhSprintQueryDto>(endpoints.sprintQuery(rapidViewId));
   const recent = (query.sprints ?? [])
     .filter(filter)
     .sort((a, b) => b.sequence - a.sequence)
     .slice(0, Math.max(0, limit));
 
-  const reports = await Promise.all(
-    recent.map(async (sprint) => {
-      const report = await jiraGetJsonRetry<GhSprintReportDto>(
-        endpoints.sprintReport(rapidViewId, sprint.id),
-      ).catch(() => null);
-      return report ? { sprint, report } : null;
-    }),
+  const settled = await mapWithConcurrency(recent, SPRINT_REPORT_CONCURRENCY, (sprint) =>
+    jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),
   );
-  return reports.filter((r): r is { sprint: GhSprint; report: GhSprintReportDto } => r !== null);
+
+  const ok: SprintReportsFetch['ok'] = [];
+  let failed = 0;
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') ok.push({ sprint: recent[i], report: r.value });
+    else failed++;
+  });
+  return { ok, failed };
 }
 
 /**
@@ -78,12 +93,8 @@ export async function getBoardBacklog(rapidViewId: number): Promise<BoardBacklog
  * completed SP = contents.completedIssuesEstimateSum.value, где `value` может ОТСУТСТВОВАТЬ → 0.
  */
 export async function getSprintVelocities(rapidViewId: number, lastN: number): Promise<number[]> {
-  const reports = await fetchRecentSprintReports(
-    rapidViewId,
-    lastN,
-    (s) => s.state === 'CLOSED',
-  );
-  return reports.map(({ report }) => report.contents?.completedIssuesEstimateSum?.value ?? 0);
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  return ok.map(({ report }) => report.contents?.completedIssuesEstimateSum?.value ?? 0);
 }
 
 /**
@@ -97,9 +108,9 @@ export async function getQuarterSprints(
   rapidViewId: number,
   limit: number,
 ): Promise<SprintRecord[]> {
-  const reports = await fetchRecentSprintReports(rapidViewId, limit);
+  const { ok } = await fetchRecentSprintReports(rapidViewId, limit);
 
-  return reports
+  return ok
     .map(({ sprint, report }): SprintRecord => {
       // ACL только раскладывает сырьё по бакетам (SP на закрытии = currentEstimate); решение
       // «что из notDone считать планом» принимает core/metrics по state — здесь без интерпретации.
@@ -131,8 +142,8 @@ export async function getSprintOutcomes(
   rapidViewId: number,
   lastN: number,
 ): Promise<SprintOutcome[]> {
-  const reports = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
-  return reports
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  return ok
     .map(({ sprint, report }): SprintOutcome => {
       const c = report.contents;
       // carryover = взятые, но не завершённые задачи (переносятся дальше): в SP И в задачах.
@@ -163,25 +174,19 @@ async function fetchStatusTransitions(issueKey: string) {
 }
 
 /**
- * Прогнать `items` через async `fn` с ОГРАНИЧЕННОЙ конкурентностью (пул воркеров).
- * Changelog — это N запросов; Promise.all над сотней задач залил бы Jira и словил rate-limit.
- * Сохраняет порядок результатов. Упавший элемент — вызов fn сам решает (у нас: [] / null).
+ * mapWithConcurrency, но fn НЕ должна кидать (у changelog-вызовов fn сама возвращает []/null при
+ * ошибке) — поэтому разворачиваем settled в простой R[]. Единый пул воркеров — в client.ts.
  */
 async function mapLimit<T, R>(
   items: readonly T[],
   limit: number,
   fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i], i);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
+  const settled = await mapWithConcurrency(items, limit, fn);
+  return settled.map((r, i) => {
+    if (r.status === 'fulfilled') return r.value;
+    throw r.reason ?? new Error(`mapLimit item ${i} rejected`);
+  });
 }
 
 /** Равномерная выборка ≤`max` элементов (каждый k-й) — для дешёвого сэмпла истории. */
@@ -238,8 +243,8 @@ export async function getCycleTimeHistory(
   workStatuses: readonly string[],
   doneStatuses: readonly string[],
 ): Promise<number[]> {
-  const reports = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
-  const allKeys = reports.flatMap(({ report }) =>
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  const allKeys = ok.flatMap(({ report }) =>
     (report.contents?.completedIssues ?? []).map((i) => i.key),
   );
   // Не тянем changelog для ВСЕХ завершённых (их сотни) — равномерный сэмпл + пул воркеров.
@@ -271,8 +276,8 @@ export async function getBoardSprintReports(
   rapidViewId: number,
   lastN: number,
 ): Promise<SprintReportDetail[]> {
-  const reports = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
-  return reports.map(({ report }) => mapSprintReportDetail(report));
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  return ok.map(({ report }) => mapSprintReportDetail(report));
 }
 
 /**
@@ -281,26 +286,28 @@ export async function getBoardSprintReports(
  * Фильтр по дате — на domain-объекте (isoStartDate), т.к. sprintquery дат не отдаёт, они
  * приходят в sprintreport. Спринт без валидной isoStartDate отбрасывается (нельзя отнести к кварталу).
  *
- * N+1 запросов (по sprintreport на каждый закрытый спринт) — на реальной доске это десятки
- * параллельных запросов; jiraGetJsonRetry страхует от спорадических отказов Jira.
+ * N+1 запросов идут через ПУЛ конкурентности (не Promise.all по всем) + ретрай с Retry-After —
+ * чтобы не пробивать burst-лимит Jira и не терять спринты на случайных 429. Число НЕзагруженных
+ * возвращается в `failed` (частичные данные), UI показывает это пользователю.
  */
 export async function getBoardSprintReportsSince(
   rapidViewId: number,
   sinceIso: string,
-): Promise<SprintReportDetail[]> {
+): Promise<SprintReportsResult> {
   const since = Date.parse(sinceIso);
-  const reports = await fetchRecentSprintReports(
+  const { ok, failed } = await fetchRecentSprintReports(
     rapidViewId,
     Number.MAX_SAFE_INTEGER,
     (s) => s.state === 'CLOSED',
   );
-  return reports
+  const sprints = ok
     .map(({ report }) => mapSprintReportDetail(report))
     .filter((d) => {
       if (!d.isoStartDate) return false;
       const t = Date.parse(d.isoStartDate);
       return !Number.isNaN(t) && t >= since;
     });
+  return { sprints, failed };
 }
 
 export { setJiraAuth } from './client';
