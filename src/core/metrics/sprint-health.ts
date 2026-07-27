@@ -321,15 +321,69 @@ export function healthBySprint(
   return out;
 }
 
-/** Сводка по одному правилу за последние N спринтов — для шапки страницы. */
+/**
+ * Сводка по одному правилу за последние N спринтов — для шапки страницы.
+ *
+ * Принцип подачи (methodology проекта, research 2026-07-08, см. core/domain/reliability.ts):
+ * метрика показывается как ТРЕНД против собственной истории команды, а не как счётчик
+ * нарушений фикс-порога. Счётчик «4 из 6 вне нормы» не говорит ни насколько всё плохо,
+ * ни куда движется — поэтому здесь есть и типичное значение, и направление.
+ */
 export interface RuleSummary {
   rule: RuleId;
-  /** Сколько спринтов окна нарушили правило. */
+  /** Сколько спринтов окна нарушили правило (порог — ориентир, не вердикт). */
   warnCount: number;
   /** Сколько спринтов реально оценивались (без no-data / insufficient-history). */
   evaluated: number;
   /** Значения по спринтам от СТАРЫХ к свежим — для спарклайна (null там, где не считалось). */
   trend: Array<number | null>;
+  /** Типичное значение окна — МЕДИАНА (устойчива к одиночному выбросу). null — нечего считать. */
+  typical: number | null;
+  /** Порог правила — чтобы UI показал «22% при ориентире 20%». */
+  threshold: number;
+  /**
+   * Куда движется: сравнение свежей половины окна со старой (та же логика, что в reliability).
+   * 'up' — значение растёт, 'down' — падает. Что из этого хорошо, решает UI по смыслу правила.
+   */
+  direction: 'up' | 'down' | 'flat' | null;
+  /** Средние половин окна — для подписи «было 14% → стало 2%». null, если данных мало. */
+  olderAvg: number | null;
+  recentAvg: number | null;
+}
+
+/**
+ * Причинно-следственная модель метрик (Cohn, Mountain Goat Software, «Spillover in Agile»):
+ * перенос (spillover) — СЛЕДСТВИЕ, у которого три названные причины:
+ *   «ambitious sprint goal»        → берут больше обычного (видно как просадка скорости);
+ *   «too much unplanned work»      → добавлено после старта;
+ *   «underestimating the effort»   → рост оценок уже взятых задач.
+ * Поэтому сводка не показывает пять равных счётчиков, а связывает следствие с вероятной причиной.
+ * https://www.mountaingoatsoftware.com/blog/unfinished-work-every-sprint-three-ways-to-break-the-habit
+ */
+export const CARRYOVER_CAUSES: readonly RuleId[] = ['scope-added', 'reestimate', 'velocity-drop'];
+
+/**
+ * Направление тренда: свежая половина против старой, с порогом 5% чтобы шум не читался как тренд.
+ * Логика намеренно совпадает с trendDirection из reliability.ts (там она уже проверена
+ * на квартальных трендах) — метрики расширения должны вести себя одинаково.
+ */
+function halves(values: number[]): {
+  older: number | null;
+  recent: number | null;
+  direction: 'up' | 'down' | 'flat' | null;
+} {
+  if (values.length < 3) return { older: null, recent: null, direction: null };
+  const half = Math.floor(values.length / 2);
+  const avg = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+  const older = avg(values.slice(0, half));
+  const recent = avg(values.slice(values.length - half));
+  const eps = Math.abs(older) * 0.05;
+  const diff = recent - older;
+  return {
+    older: round3(older),
+    recent: round3(recent),
+    direction: diff > eps ? 'up' : diff < -eps ? 'down' : 'flat',
+  };
 }
 
 /**
@@ -347,11 +401,93 @@ export function healthSummary(
 
   return rules.map((rule) => {
     const results = recent.map((s) => health.get(s.sprintId)?.find((r) => r.rule === rule));
+    const counted = (r: RuleResult | undefined) => r?.status === 'warn' || r?.status === 'ok';
+    // Хронология: старые слева — так читаются спарклайны и так же считаются половины тренда.
+    const trend = results.map((r) => (counted(r) ? r!.value : null)).reverse();
+    const values = trend.filter((v): v is number => v !== null);
+    const { older, recent: recentAvg, direction } = halves(values);
+
     return {
       rule,
       warnCount: results.filter((r) => r?.status === 'warn').length,
-      evaluated: results.filter((r) => r?.status === 'warn' || r?.status === 'ok').length,
-      trend: results.map((r) => (r?.status === 'warn' || r?.status === 'ok' ? r.value : null)).reverse(),
+      evaluated: results.filter(counted).length,
+      trend,
+      // Медиана, а не среднее: один аномальный спринт не должен задавать «типичное» значение.
+      typical: median(values),
+      threshold: results.find(counted)?.threshold ?? 0,
+      direction,
+      olderAvg: older,
+      recentAvg,
     };
   });
+}
+
+/**
+ * Главный вывод по окну спринтов — то, ради чего тимлид смотрит на сводку.
+ *
+ * Почему не «4 из 6 вне нормы»: счётчик нарушений не проходит тест на пригодность
+ * («если число изменится, кто-то завтра сделает иначе?») и показывает значение без истории —
+ * то, что Tufte называет «nuggets of information devoid of meaningful context».
+ * Поэтому здесь: что происходит (следствие), почему (причина по Cohn), что уже улучшилось.
+ */
+export interface HealthVerdict {
+  /** Правило-проблема №1 или null, если всё в пределах ориентиров. */
+  focus: RuleSummary | null;
+  /** Вероятная причина проблемы (для переноса — по модели Cohn). null — причина не выделяется. */
+  cause: RuleSummary | null;
+  /** Что заметно улучшилось за окно — это тоже сигнал (не только плохое). */
+  improved: RuleSummary[];
+  /** Стало ли хуже по правилу-фокусу. */
+  worsening: boolean;
+  /** Хроническая ли проблема: нарушена в большинстве спринтов окна. */
+  chronic: boolean;
+}
+
+/** Насколько правило превышает свой ориентир (в долях порога). Для сравнения разных метрик. */
+function severity(s: RuleSummary): number {
+  if (s.typical === null || s.evaluated === 0) return -1;
+  // punted с порогом 0 нельзя делить — берём само число задач как меру.
+  if (s.threshold === 0) return s.typical;
+  return s.typical / s.threshold;
+}
+
+/**
+ * Выбрать главное из сводки. `summaries` — результат healthSummary.
+ *
+ * Фокус — правило с наибольшим относительным превышением ориентира. Если это перенос,
+ * причина ищется среди трёх причин Cohn (та, что сама вышла за ориентир сильнее прочих).
+ */
+export function healthVerdict(summaries: readonly RuleSummary[]): HealthVerdict {
+  const evaluated = summaries.filter((s) => s.evaluated > 0 && s.typical !== null);
+  const over = evaluated.filter((s) => overThreshold(s.typical!, s.threshold));
+
+  // Приоритет следствию над причиной: если перенос вышел за ориентир, он и есть проблема,
+  // а просадка скорости / вбросы / рост оценок — то, ЧЕМ она объясняется (Cohn). Иначе тимлид
+  // получил бы «почини скорость», хотя скорость проседает именно из-за хвостов прошлых спринтов.
+  const carryover = over.find((s) => s.rule === 'carryover');
+  const focus =
+    carryover ?? (over.length ? over.reduce((a, b) => (severity(b) > severity(a) ? b : a)) : null);
+
+  let cause: RuleSummary | null = null;
+  if (focus?.rule === 'carryover') {
+    const candidates = evaluated.filter(
+      (s) => CARRYOVER_CAUSES.includes(s.rule) && overThreshold(s.typical!, s.threshold),
+    );
+    cause = candidates.length
+      ? candidates.reduce((a, b) => (severity(b) > severity(a) ? b : a))
+      : null;
+  }
+
+  // Улучшение засчитываем только при реальном движении вниз — не по шуму (direction уже с eps 5%).
+  const improved = evaluated.filter(
+    (s) => s.direction === 'down' && s.olderAvg !== null && s.recentAvg !== null,
+  );
+
+  return {
+    focus,
+    cause,
+    improved,
+    worsening: focus?.direction === 'up',
+    chronic: focus !== null && focus.warnCount > focus.evaluated / 2,
+  };
 }

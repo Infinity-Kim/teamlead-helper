@@ -23,6 +23,7 @@ import {
   issueInSlice,
   healthBySprint,
   healthSummary,
+  healthVerdict,
   toThresholds,
   CAP_SLICES,
   type QuarterGroup,
@@ -344,12 +345,114 @@ const SUMMARY_LABEL: Record<RuleId, string> = {
   punted: 'Выброшено',
 };
 
-/** Пояснение к сводке: что считали и за какое окно. */
+/** Проценты сводки: до 1 знака при малых значениях, иначе целые (7.3% против «7%»). */
+function fmtPct(v: number | null): string {
+  if (v === null) return '—';
+  const abs = Math.abs(v) * 100;
+  return (abs < 10 ? abs.toFixed(1) : abs.toFixed(0)) + '%';
+}
+
+/** Значение правила в сводке: перенос/скорость — в %, выброшенные — в задачах. */
+function summaryValue(rs: RuleSummary): string {
+  if (rs.typical === null) return '—';
+  return rs.rule === 'punted' ? `${fmtNum(rs.typical)} зад.` : fmtPct(rs.typical);
+}
+
+/** Главный вывод по окну: что чинить, почему и что уже наладилось. */
+const verdict = computed(() =>
+  report.value ? healthVerdict(report.value.healthSummary) : null,
+);
+
+/**
+ * Формулировка проблемы человеческим языком. Опирается на причинно-следственную модель
+ * Cohn: перенос — следствие, а «взяли больше», «вбросы», «рост оценок» — его причины.
+ */
+const verdictText = computed(() => {
+  const v = verdict.value;
+  if (!v) return null;
+  if (!v.focus) {
+    return { headline: 'Спринты идут в пределах ориентиров', detail: '' };
+  }
+  const f = v.focus;
+
+  const HEAD: Record<RuleId, string> = {
+    carryover: `Команда берёт больше, чем закрывает: ${summaryValue(f)} работы уезжает в следующий спринт`,
+    'velocity-drop': `Скорость держится ниже привычной: типично на ${summaryValue(f)} меньше медианы предыдущих спринтов`,
+    reestimate: `Оценки растут уже в спринте: в среднем на ${summaryValue(f)} от взятого объёма`,
+    'scope-added': `В спринт добавляют работу после старта: ${summaryValue(f)} сверх плана`,
+    punted: `Из спринтов убирают задачи после старта: ${summaryValue(f)} за спринт`,
+  };
+  const CAUSE: Partial<Record<RuleId, string>> = {
+    'velocity-drop': 'берут больше, чем обычно успевают',
+    'scope-added': 'в спринт добавляют работу после старта',
+    reestimate: 'задачи оказываются объёмнее, чем оценили',
+  };
+
+  // «4 спринта из 6» — склонение по числу, иначе получается «в 4 спринтов из 6 спринтов».
+  const plural = (n: number) => {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return 'спринте';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'спринтах';
+    return 'спринтах';
+  };
+  const ref =
+    f.rule === 'punted' ? `${fmtNum(f.threshold)} задач` : fmtPct(f.threshold);
+  const parts: string[] = [
+    `Так в ${f.warnCount} ${plural(f.warnCount)} из ${f.evaluated}${v.chronic ? ' — это уже привычка, а не случайность' : ''}. Ориентир — ${ref}.`,
+  ];
+  if (v.cause && CAUSE[v.cause.rule]) {
+    parts.push(`Вероятная причина: ${CAUSE[v.cause.rule]} (${summaryValue(v.cause)}).`);
+  }
+  if (v.worsening) parts.push('В последних спринтах стало заметнее.');
+  return { headline: HEAD[f.rule], detail: parts.join(' ') };
+});
+
+/** «Что наладилось» — короткие фразы вида «вбросов стало меньше: 14% → 2%». */
+const improvedText = computed(() => {
+  const IMPROVED: Record<RuleId, string> = {
+    carryover: 'переносить стали меньше',
+    'velocity-drop': 'скорость выровнялась',
+    reestimate: 'оценки стали точнее',
+    'scope-added': 'реже добавляют работу после старта',
+    punted: 'перестали убирать задачи из спринта',
+  };
+  // Для «выброшено» единица — задачи, и дробное «0.3 задачи» бессмысленно: округляем.
+  const fmtBy = (rule: RuleId, v: number | null) =>
+    rule === 'punted' ? String(Math.round(v ?? 0)) : fmtPct(v);
+  return (verdict.value?.improved ?? [])
+    .map((s) => ({
+      rule: s.rule,
+      text: IMPROVED[s.rule],
+      from: fmtBy(s.rule, s.olderAvg),
+      to: fmtBy(s.rule, s.recentAvg),
+    }))
+    // Если после округления «было» и «стало» совпали, улучшение не читается — не показываем.
+    .filter((s) => s.from !== s.to);
+});
+
+/** Направление словом + «хорошо ли это» для конкретного правила (рост всех пяти — плохо). */
+function directionNote(rs: RuleSummary): { arrow: string; word: string; good: boolean } | null {
+  // Значение уже на нуле — «снижается» бессмысленно (снижаться некуда).
+  if (rs.typical === 0 && rs.direction === 'down') {
+    return { arrow: '', word: 'нет', good: true };
+  }
+  if (!rs.direction || rs.direction === 'flat') {
+    return rs.direction === 'flat' ? { arrow: '→', word: 'ровно', good: true } : null;
+  }
+  const up = rs.direction === 'up';
+  return { arrow: up ? '↑' : '↓', word: up ? 'растёт' : 'снижается', good: !up };
+}
+
+/** Пояснение к строке сводки: типичное значение, ориентир, динамика. */
 function summaryHint(rs: RuleSummary): string {
   if (rs.evaluated === 0) {
     return `${SUMMARY_LABEL[rs.rule]}: нет спринтов, для которых правило можно посчитать (мало истории или Jira не отдала данные)`;
   }
-  return `${SUMMARY_LABEL[rs.rule]}: ${rs.warnCount} из ${rs.evaluated} последних спринтов вне нормы`;
+  const base = `${SUMMARY_LABEL[rs.rule]}: типично ${summaryValue(rs)} при ориентире ${rs.rule === 'punted' ? fmtNum(rs.threshold) + ' зад.' : fmtPct(rs.threshold)}. Вне ориентира ${rs.warnCount} из ${rs.evaluated} спринтов.`;
+  if (rs.olderAvg === null || rs.recentAvg === null) return base;
+  const fmt = rs.rule === 'punted' ? fmtNum : fmtPct;
+  return `${base} Первая половина окна ${fmt(rs.olderAvg)} → вторая ${fmt(rs.recentAvg)}.`;
 }
 
 /** Человекочитаемые имена правил — для подписи раскрытого списка. */
@@ -556,34 +659,89 @@ const CAP_SLICES_ALL = CAP_SLICES;
             </span>
           </div>
 
-          <!-- Сводка здоровья: сколько спринтов из окна вне нормы по каждому правилу -->
-          <div
-            v-if="report.healthSummary.length"
-            class="mb-4 flex flex-wrap gap-x-5 gap-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900"
+          <!--
+            Сводка окна. Не счётчик нарушений («4 из 6 вне нормы» не отвечает ни насколько
+            плохо, ни куда движется), а вывод + типичное значение + динамика: число без
+            истории и сравнения бессмысленно (Tufte), а следствие отделено от причины (Cohn).
+          -->
+          <section
+            v-if="report.healthSummary.length && verdictText"
+            class="mb-4 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
           >
+            <!-- Главный вывод словами -->
             <div
-              v-for="rs in report.healthSummary"
-              :key="rs.rule"
-              class="flex items-baseline gap-1.5 text-xs"
-              :title="summaryHint(rs)"
+              class="px-4 py-3"
+              :class="
+                verdict?.focus
+                  ? 'bg-amber-50/70 dark:bg-amber-950/20'
+                  : 'bg-emerald-50/60 dark:bg-emerald-950/20'
+              "
             >
-              <span class="text-slate-500 dark:text-slate-400">{{ SUMMARY_LABEL[rs.rule] }}</span>
-              <template v-if="rs.evaluated > 0">
-                <b
-                  class="tabular-nums"
-                  :class="
-                    rs.warnCount > 0
-                      ? 'text-amber-700 dark:text-amber-300'
-                      : 'text-emerald-700 dark:text-emerald-400'
-                  "
-                >
-                  {{ rs.warnCount }}/{{ rs.evaluated }}
-                </b>
-                <span class="text-slate-400">вне нормы</span>
-              </template>
-              <span v-else class="text-slate-400">нет данных</span>
+              <p class="text-sm font-medium text-slate-800 dark:text-slate-100">
+                {{ verdictText.headline }}
+              </p>
+              <p v-if="verdictText.detail" class="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                {{ verdictText.detail }}
+              </p>
+              <p
+                v-if="improvedText.length"
+                class="mt-1.5 text-xs leading-relaxed text-emerald-700 dark:text-emerald-400"
+              >
+                Наладилось:
+                <span v-for="(im, idx) in improvedText" :key="im.rule">
+                  {{ im.text }} ({{ im.from }} → {{ im.to }}){{ idx < improvedText.length - 1 ? ', ' : '' }}
+                </span>
+              </p>
             </div>
-          </div>
+
+            <!-- Цифры по каждому правилу: типичное значение, ориентир, направление -->
+            <p
+              class="border-t border-slate-100 px-4 pt-2 text-[10px] uppercase tracking-wide text-slate-400 dark:border-slate-800"
+            >
+              типично за 6 спринтов / ориентир · динамика
+            </p>
+            <div
+              class="grid gap-x-6 gap-y-1.5 px-4 pb-2.5 pt-1.5 sm:grid-cols-2 xl:grid-cols-3"
+            >
+              <!--
+                Сетка внутри строки, а не flex с ml-auto: при узкой колонке значения
+                переносились на вторую строку и подписи соседних правил слипались.
+              -->
+              <div
+                v-for="rs in report.healthSummary"
+                :key="rs.rule"
+                class="grid grid-cols-[minmax(72px,auto)_minmax(0,1fr)_auto] items-baseline gap-x-2 text-xs"
+                :title="summaryHint(rs)"
+              >
+                <span class="truncate text-slate-500 dark:text-slate-400">
+                  {{ SUMMARY_LABEL[rs.rule] }}
+                </span>
+                <template v-if="rs.evaluated > 0">
+                  <span class="whitespace-nowrap">
+                    <b class="tabular-nums text-slate-800 dark:text-slate-100">
+                      {{ summaryValue(rs) }}
+                    </b>
+                    <span class="text-slate-400">
+                      / {{ rs.rule === 'punted' ? fmtNum(rs.threshold) : fmtPct(rs.threshold) }}
+                    </span>
+                  </span>
+                  <span
+                    class="whitespace-nowrap text-right"
+                    :class="
+                      directionNote(rs) && !directionNote(rs)!.good
+                        ? 'text-amber-700 dark:text-amber-400'
+                        : 'text-slate-400'
+                    "
+                  >
+                    <template v-if="directionNote(rs)">
+                      {{ directionNote(rs)!.arrow }} {{ directionNote(rs)!.word }}
+                    </template>
+                  </span>
+                </template>
+                <span v-else class="col-span-2 text-slate-400">мало истории</span>
+              </div>
+            </div>
+          </section>
 
           <!-- Квартальная сводка: ряд кварталов со стек-баром CAP-микса (вариант A) -->
           <div class="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

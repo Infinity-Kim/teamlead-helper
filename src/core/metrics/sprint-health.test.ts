@@ -7,6 +7,7 @@ import {
   rulePunted,
   healthBySprint,
   healthSummary,
+  healthVerdict,
   toThresholds,
   type HealthThresholds,
 } from './sprint-health';
@@ -252,6 +253,55 @@ describe('healthBySprint', () => {
   });
 });
 
+describe('healthVerdict', () => {
+  /** Спринт с заданными перекосами: carry — доля переноса, added — доля вброса. */
+  const mk = (id: number, carry: number, added = 0) => {
+    const done = 100 - carry;
+    const addedIssue = added > 0 ? [issue(`N${id}`, added)] : [];
+    return sprint({
+      sprintId: id,
+      completedIssues: [issue(`A${id}`, done), ...addedIssue],
+      notCompletedIssues: [issue(`B${id}`, carry)],
+      addedIssueKeys: new Set(addedIssue.map((i) => i.key)),
+      allPoints: 100 + added,
+    });
+  };
+
+  it('фокусом делает ПЕРЕНОС, даже если другое правило превышено сильнее', () => {
+    // Перенос 30% (ориентир 20%), вброс 40% (ориентир 10%, превышен в 4 раза) — фокус всё равно
+    // перенос: по Cohn вброс это ПРИЧИНА переноса, лечим следствие, назвав причину.
+    const sprints = [1, 2, 3, 4].map((i) => mk(i, 45, 40));
+    const v = healthVerdict(healthSummary(sprints, T, 6));
+    expect(v.focus?.rule).toBe('carryover');
+    expect(v.cause?.rule).toBe('scope-added');
+  });
+
+  it('без переноса фокус — самое сильное превышение ориентира', () => {
+    const sprints = [1, 2, 3, 4].map((i) => mk(i, 5, 40));
+    const v = healthVerdict(healthSummary(sprints, T, 6));
+    expect(v.focus?.rule).toBe('scope-added');
+    expect(v.cause).toBeNull(); // причина выделяется только для переноса
+  });
+
+  it('всё в пределах ориентиров → фокуса нет', () => {
+    const sprints = [1, 2, 3, 4].map((i) => mk(i, 5));
+    expect(healthVerdict(healthSummary(sprints, T, 6)).focus).toBeNull();
+  });
+
+  it('отмечает хроническую проблему (нарушена в большинстве спринтов)', () => {
+    const sprints = [1, 2, 3, 4].map((i) => mk(i, 30));
+    const v = healthVerdict(healthSummary(sprints, T, 6));
+    expect(v.chronic).toBe(true);
+  });
+
+  it('замечает улучшение, а не только проблемы', () => {
+    // Вброс падает 40% → 0: от старых к свежим. Вход — от свежих к старым.
+    const sprints = [mk(4, 5, 0), mk(3, 5, 0), mk(2, 5, 40), mk(1, 5, 40)];
+    const v = healthVerdict(healthSummary(sprints, T, 6));
+    expect(v.improved.map((i) => i.rule)).toContain('scope-added');
+  });
+});
+
 describe('healthSummary', () => {
   it('считает нарушения и отделяет их от неоценённых спринтов', () => {
     // Свежий спринт просел вдвое; у остальных нет полной истории → insufficient-history.
@@ -263,6 +313,40 @@ describe('healthSummary', () => {
     const drop = summary.find((s) => s.rule === 'velocity-drop')!;
     expect(drop.warnCount).toBe(1);
     expect(drop.evaluated).toBe(1); // остальные 5 — insufficient-history
+  });
+
+  it('даёт типичное значение (медиану) и ориентир, а не только счётчик нарушений', () => {
+    // Медиана устойчива к выбросу: 50% в одном спринте не делает «типичным» половину.
+    const sprints = [
+      sprint({ sprintId: 3, completedIssues: [issue('A', 90)], notCompletedIssues: [issue('B', 10)] }),
+      sprint({ sprintId: 2, completedIssues: [issue('C', 90)], notCompletedIssues: [issue('D', 10)] }),
+      sprint({ sprintId: 1, completedIssues: [issue('E', 50)], notCompletedIssues: [issue('F', 50)] }),
+    ];
+    const carry = healthSummary(sprints, T, 6).find((s) => s.rule === 'carryover')!;
+    expect(carry.typical).toBe(0.1);
+    expect(carry.threshold).toBe(0.2);
+  });
+
+  it('показывает направление и средние половин окна («было → стало»)', () => {
+    // Перенос падает: старые 50%/50% → свежие 10%/10%.
+    const bad = (id: number) =>
+      sprint({ sprintId: id, completedIssues: [issue(`C${id}`, 50)], notCompletedIssues: [issue(`D${id}`, 50)] });
+    const good = (id: number) =>
+      sprint({ sprintId: id, completedIssues: [issue(`A${id}`, 90)], notCompletedIssues: [issue(`B${id}`, 10)] });
+    // Вход от свежих к старым: свежие — хорошие.
+    const carry = healthSummary([good(4), good(3), bad(2), bad(1)], T, 6).find(
+      (s) => s.rule === 'carryover',
+    )!;
+    expect(carry.olderAvg).toBe(0.5);
+    expect(carry.recentAvg).toBe(0.1);
+    expect(carry.direction).toBe('down');
+  });
+
+  it('при малой истории направление не выдумывается', () => {
+    const sprints = [sprint({ sprintId: 1, completedIssues: [issue('A', 10)] })];
+    const carry = healthSummary(sprints, T, 6).find((s) => s.rule === 'carryover')!;
+    expect(carry.direction).toBeNull();
+    expect(carry.olderAvg).toBeNull();
   });
 
   it('тренд разворачивается в хронологию (старые слева)', () => {
