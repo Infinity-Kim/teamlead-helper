@@ -1,0 +1,305 @@
+{
+  "sums": {
+    "completedIssuesInitialEstimateSum": {
+      "value": 64,
+      "text": "64.0"
+    },
+    "completedIssuesEstimateSum": {
+      "value": 66,
+      "text": "66.0"
+    },
+    "issuesNotCompletedInitialEstimateSum": {
+      "value": 22,
+      "text": "22.0"
+    },
+    "issuesNotCompletedEstimateSum": {
+      "value": 22,
+      "text": "22.0"
+    },
+    "allIssuesEstimateSum": {
+      "value": 91,
+      "text": "91.0"
+    },
+    "puntedIssuesInitialEstimateSum": {
+      "text": "null"
+    },
+    "puntedIssuesEstimateSum": {
+      "text": "null"
+    },
+    "issuesCompletedInAnotherSprintInitialEstimateSum": {
+      "value": 2,
+      "text": "2.0"
+    },
+    "issuesCompletedInAnotherSprintEstimateSum": {
+      "value": 2,
+      "text": "2.0"
+    }
+  },
+  "issueKeysAddedDuringSprint": {
+    "ELCAS-12646": true
+  },
+  "completedIssueSample": {
+    "id": 229203,
+    "key": "ELCAS-11316",
+    "hidden": false,
+    "parentId": 229197,
+    "parentKey": "ELCAS-11310",
+    "typeName": "История",
+    "typeId": "10006",
+    "typeHierarchyLevel": 0,
+    "summary": " [BE] Внести данные в BO и DB для игры \"Card Duel\"",
+    "typeUrl": "https://tvbet.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10314?size=medium",
+    "priorityUrl": "https://tvbet.atlassian.net/images/icons/priorities/medium.svg",
+    "priorityName": "Medium",
+    "priorityId": "3",
+    "done": false,
+    "assignee": "712020:ee731c12-1b8d-41cb-ace6-a14e1f42693e",
+    "assigneeKey": "712020:ee731c12-1b8d-41cb-ace6-a14e1f42693e",
+    "assigneeAccountId": "712020:ee731c12-1b8d-41cb-ace6-a14e1f42693e",
+    "assigneeName": "Kseniya Stoka",
+    "avatarUrl": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/712020:ee731c12-1b8d-41cb-ace6-a14e1f42693e/a4027ab4-e4d6-478b-8f2b-12c24d91336f/48",
+    "accountType": "atlassian",
+    "hasCustomUserAvatar": false,
+    "color": "#943d73",
+    "flagged": true,
+    "labels": [
+      "CAP_Product",
+      "template"
+    ],
+    "epic": "ELCAS-11310",
+    "epicField": {
+      "id": "customfield_10011",
+      "label": "Эпик",
+      "editable": false,
+      "renderer": "epiclink",
+      "issueId": 229197,
+      "summary": "[CardDuelElcas] Разработка игры и ее запуск на партнерах",
+      "epicKey": "ELCAS-11310",
+      "epicColor": "ghx-label-3",
+      "color": "yellow",
+      "text": "[Card Duel] Разработка игры и ее запуск на партнерах",
+      "issueTypeId": "10000",
+      "issueTypeIconUrl": "/images/icons/issuetypes/epic.svg",
+      "canRemoveEpic": false
+    },
+    "columnStatistic": {
+      "statFieldId": "issueCount",
+      "statFieldValue": {
+        "value": 1,
+        "text": "1.0"
+      }
+    },
+    "currentEstimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 5
+      }
+    },
+    "estimateStatisticRequired": false,
+    "estimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 5
+      }
+    },
+    "statusId": "10004",
+    "statusName": "Готово",
+    "statusUrl": "https://tvbet.atlassian.net/",
+    "status": {
+      "id": "10004",
+      "name": "Готово",
+      "description": "",
+      "iconUrl": "https://tvbet.atlassian.net/",
+      "statusCategory": {
+        "id": "3",
+        "key": "done",
+        "colorName": "green"
+      }
+    },
+    "fixVersions": [
+      28671
+    ],
+    "projectId": 10067,
+    "linkedPagesCount": 0,
+    "sprintIds": [
+      9465
+    ],
+    "updatedAt": 1784015286727
+  },
+  "notCompletedSample": {
+    "id": 232848,
+    "key": "ELCAS-11485",
+    "hidden": false,
+    "parentId": 229197,
+    "parentKey": "ELCAS-11310",
+    "typeName": "История",
+    "typeId": "10006",
+    "typeHierarchyLevel": 0,
+    "summary": "[FE] Реализовать стол в игре \"Card Duel\"",
+    "typeUrl": "https://tvbet.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10314?size=medium",
+    "priorityUrl": "https://tvbet.atlassian.net/images/icons/priorities/medium.svg",
+    "priorityName": "Medium",
+    "priorityId": "3",
+    "done": false,
+    "assignee": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeKey": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeAccountId": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeName": "Maksim Astapkevich",
+    "avatarUrl": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/712020:fa81c7c3-764b-4937-b172-935a53859074/d3ddac1c-892d-4a00-9da3-67f952801093/48",
+    "accountType": "atlassian",
+    "hasCustomUserAvatar": false,
+    "color": "#2898bd",
+    "flagged": true,
+    "labels": [
+      "CAP_Product"
+    ],
+    "epic": "ELCAS-11310",
+    "epicField": {
+      "id": "customfield_10011",
+      "label": "Эпик",
+      "editable": false,
+      "renderer": "epiclink",
+      "issueId": 229197,
+      "summary": "[CardDuelElcas] Разработка игры и ее запуск на партнерах",
+      "epicKey": "ELCAS-11310",
+      "epicColor": "ghx-label-3",
+      "color": "yellow",
+      "text": "[Card Duel] Разработка игры и ее запуск на партнерах",
+      "issueTypeId": "10000",
+      "issueTypeIconUrl": "/images/icons/issuetypes/epic.svg",
+      "canRemoveEpic": false
+    },
+    "columnStatistic": {
+      "statFieldId": "issueCount",
+      "statFieldValue": {
+        "value": 1,
+        "text": "1.0"
+      }
+    },
+    "currentEstimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 8
+      }
+    },
+    "estimateStatisticRequired": false,
+    "estimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 8
+      }
+    },
+    "statusId": "10012",
+    "statusName": "DEV",
+    "statusUrl": "https://tvbet.atlassian.net/images/icons/statuses/generic.png",
+    "status": {
+      "id": "10012",
+      "name": "DEV",
+      "description": "",
+      "iconUrl": "https://tvbet.atlassian.net/images/icons/statuses/generic.png",
+      "statusCategory": {
+        "id": "4",
+        "key": "indeterminate",
+        "colorName": "yellow"
+      }
+    },
+    "fixVersions": [
+      29138
+    ],
+    "projectId": 10067,
+    "linkedPagesCount": 0,
+    "sprintIds": [
+      9465,
+      9466
+    ],
+    "updatedAt": 1785134746046
+  },
+  "completedInAnotherSample": {
+    "id": 248706,
+    "key": "ELCAS-12413",
+    "hidden": false,
+    "parentId": 226829,
+    "parentKey": "ELCAS-11207",
+    "typeName": "Баг",
+    "typeId": "10009",
+    "typeHierarchyLevel": 0,
+    "summary": "[FE] Множитель не затирается с предыдущего тиража и иногда отображается с прожектором вместо подсветки сектора",
+    "typeUrl": "https://tvbet.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10303?size=medium",
+    "priorityUrl": "https://tvbet.atlassian.net/images/icons/priorities/high.svg",
+    "priorityName": "High",
+    "priorityId": "2",
+    "done": false,
+    "assignee": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeKey": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeAccountId": "712020:fa81c7c3-764b-4937-b172-935a53859074",
+    "assigneeName": "Maksim Astapkevich",
+    "avatarUrl": "https://avatar-management--avatars.us-west-2.prod.public.atl-paas.net/712020:fa81c7c3-764b-4937-b172-935a53859074/d3ddac1c-892d-4a00-9da3-67f952801093/48",
+    "accountType": "atlassian",
+    "hasCustomUserAvatar": false,
+    "color": "#2898bd",
+    "flagged": false,
+    "labels": [
+      "CAP_Product",
+      "FastTrack"
+    ],
+    "epic": "ELCAS-11207",
+    "epicField": {
+      "id": "customfield_10011",
+      "label": "Эпик",
+      "editable": false,
+      "renderer": "epiclink",
+      "issueId": 226829,
+      "summary": "[CandyBall X] Разработка игры и ее запуск на партнерах",
+      "epicKey": "ELCAS-11207",
+      "epicColor": "ghx-label-2",
+      "color": "dark_yellow",
+      "text": "[Template_dev] Разработка игры и ее запуск на партнерах",
+      "issueTypeId": "10000",
+      "issueTypeIconUrl": "/images/icons/issuetypes/epic.svg",
+      "canRemoveEpic": false
+    },
+    "columnStatistic": {
+      "statFieldId": "issueCount",
+      "statFieldValue": {
+        "value": 1,
+        "text": "1.0"
+      }
+    },
+    "currentEstimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 2
+      }
+    },
+    "estimateStatisticRequired": false,
+    "estimateStatistic": {
+      "statFieldId": "customfield_10033",
+      "statFieldValue": {
+        "value": 2
+      }
+    },
+    "statusId": "10004",
+    "statusName": "Готово",
+    "statusUrl": "https://tvbet.atlassian.net/",
+    "status": {
+      "id": "10004",
+      "name": "Готово",
+      "description": "",
+      "iconUrl": "https://tvbet.atlassian.net/",
+      "statusCategory": {
+        "id": "3",
+        "key": "done",
+        "colorName": "green"
+      }
+    },
+    "fixVersions": [
+      28673
+    ],
+    "projectId": 10067,
+    "linkedPagesCount": 0,
+    "sprintIds": [
+      9465
+    ],
+    "updatedAt": 1782988896959
+  }
+}

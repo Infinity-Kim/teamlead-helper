@@ -26,8 +26,9 @@
 
 1. **Избыточный объём запросов.** `getBoardSprintReportsSince` (`api/jira/index.ts:293`)
    вызывает `fetchRecentSprintReports` с `limit = Number.MAX_SAFE_INTEGER` и
-   фильтрует по дате `SINCE_ISO` уже *после* загрузки. При 40 закрытых спринтах в
-   доске грузятся все 40 ради ~12 нужных.
+   фильтрует по дате `SINCE_ISO` уже *после* загрузки. Замерено на живом API
+   2026-07-27: у доски 80 (ELCAS) **83 закрытых спринта** — значит страница делает
+   83 запроса `sprintreport` ради ~12 нужных.
 2. **Кеш отбрасывает частичные данные.** `App.vue:186` пишет в persist-кеш только
    при `failed === 0`. Одна неудача — и всё открытие начинается с нуля.
    Кеш имеет TTL 30 минут и гранулярность «весь борд», хотя закрытый спринт неизменен.
@@ -36,11 +37,49 @@
 
 ## Решение: три слоя
 
-### Слой 1 — кеш по спринту (устраняет объём)
+### Слой 1 — официальный Agile API для списка + кеш по спринту
+
+Две независимые оптимизации, вместе снимающие ~95% запросов.
+
+#### 1а. Список спринтов — переход на официальный Agile API
+
+**Замена `sprintquery` (greenhopper) на `/rest/agile/1.0/board/{id}/sprint`.**
+
+Причина: официальный эндпоинт отдаёт `startDate` / `endDate` / `completeDate`
+**прямо в списке**, по 50 спринтов за запрос. Значит фильтрация по `SINCE_ISO`
+происходит **до** единого запроса за отчётами.
+
+Проверено на живом API (доска 80, 2026-07-27):
+
+```
+GET /rest/agile/1.0/board/80/sprint?state=closed&maxResults=50
+→ { isLast: false, total: 83, maxResults: 50, values: [
+     { id, self, state, name, startDate, endDate, completeDate,
+       createdDate, originBoardId, goal } ] }
+```
+
+Замер: 83 закрытых спринта = **2 запроса** вместо 1 `sprintquery` + 83 `sprintreport`.
+
+Три практических нюанса, подтверждённых замером:
+
+- **Порядок фиксированный и не настраивается:** сначала по state, внутри — по позиции
+  в backlog. Свежие закрытые спринты идут **в конце**. Параметра сортировки нет.
+  Поэтому «ранняя остановка» с начала списка невозможна — вместо неё читаем весь
+  список (2 запроса) и фильтруем локально. Это дешевле любой хитрости.
+- **`total` возвращается** (83), но полагаться на него нельзя: известный дефект
+  Jira Cloud (JSWCLOUD-22101) — поле часто отсутствует. Цикл пагинации строим
+  **на `isLast`**.
+- **`maxResults` > 50 игнорируется** (JSWSERVER-15503) — всегда придёт 50.
+- **Доска отдаёт чужие спринты.** В выдаче доски 80 присутствуют спринты с
+  `originBoardId: 16` (Web, напр. `Web-2023PI1-23.1.6`). Фильтровать по
+  `originBoardId === rapidViewId` **обязательно**, иначе в отчёт ELCAS попадут
+  чужие данные. Текущий код этой защиты не имеет.
+
+`sprintquery` после перехода не нужен; `endpoints.sprintQuery` удаляется.
+
+#### 1б. Кеш по спринту
 
 Закрытый спринт неизменен, поэтому его отчёт кешируется **бессрочно** по `sprintId`.
-
-Замена структуры хранилища:
 
 ```
 // было
@@ -48,31 +87,22 @@ local:sprintReportsCache = { updatedAt, boards: [{ rapidViewId, team, sprints[] 
 
 // стало
 local:sprintReportCache  = { [sprintId: number]: SprintReportDetail }                  // без TTL
-local:sprintListCache    = { [rapidViewId]: { updatedAt, sprints: GhSprint[] } }        // TTL ~15 мин
+local:sprintListCache    = { [rapidViewId]: { updatedAt, sprints: AgileSprint[] } }     // TTL ~15 мин
 ```
-
-Список спринтов (`sprintquery`) сохраняет короткий TTL — он меняется при закрытии
-спринта. Сами отчёты — нет.
 
 **Поток загрузки:**
 
-1. Список закрытых спринтов доски (из `sprintListCache`, если свежий; иначе сеть).
-2. Определить, какие из них нужны по дате (см. «Ранняя остановка» ниже).
+1. Список закрытых спринтов доски с датами (из `sprintListCache`, если свежий; иначе
+   2 запроса к Agile API).
+2. Отфильтровать локально: `originBoardId === rapidViewId` И `startDate >= SINCE_ISO`.
 3. Вычесть те, что уже есть в `sprintReportCache`.
-4. Запросить **только** недостающие.
+4. Запросить `sprintreport` **только** для недостающих.
 5. Записать каждый полученный отчёт в кеш немедленно, поштучно.
 
-Первое открытие — N запросов. Каждое следующее — 0–2 (новые спринты появляются
-раз в две недели).
+Первое открытие — 2 + ~12 запросов. Каждое следующее — 2 + 0–1.
 
-**Ранняя остановка по дате.** `sprintquery` не отдаёт даты — они приходят только в
-`sprintreport`. Поэтому вместе с отчётом кешируется `sprintId → isoStartDate`, а для
-незнакомых спринтов обход идёт от свежих к старым (по `sequence`, как сейчас) с
-остановкой на первом спринте, чей `isoStartDate` раньше `SINCE_ISO`. Спринты
-упорядочены хронологически, поэтому всё, что дальше, заведомо вне окна.
-
-**Инвалидация.** Кеш чистится только явной кнопкой «Обновить» (force) и при смене
-`jiraCreds`. Ограничение размера: хранить отчёты не более чем за последние 8
+**Инвалидация.** Кеш отчётов чистится только явной кнопкой «Обновить» (force) и при
+смене `jiraCreds`. Ограничение размера: хранить отчёты не более чем за последние 8
 кварталов, старые вытеснять при записи (иначе `chrome.storage.local` растёт
 неограниченно).
 
@@ -94,25 +124,42 @@ local:sprintListCache    = { [rapidViewId]: { updatedAt, sprints: GhSprint[] } }
 Существующие ретраи с `Retry-After` + экспонента + jitter (`retryDelayMs`) остаются
 без изменений — они работают корректно.
 
-### Слой 3 — фолбэк на сессию Jira (аварийный)
+### Слой 3 — ОТКЛОНЁН по результатам исследования
 
-Если после слоёв 1–2 и ретраев остались упавшие спринты, страница может дотянуть
-их через cookie-сессию вкладки Jira:
+Изначально планировался фолбэк: при упорных 429 дотягивать спринты через
+cookie-сессию открытой вкладки Jira, в расчёте на отдельный бюджет лимитов.
 
-1. Страница шлёт background сообщение `FETCH_SPRINT_REPORTS_VIA_TAB { rapidViewId, sprintIds }`.
-2. Background ищет вкладку с URL Jira (`baseUrl` из `jiraCreds`).
-3. Если нашёл — шлёт запрос content-script'у, тот делает fetch с
-   `credentials:'include'` (второй режим `buildRequest` — уже реализован).
-4. Результат возвращается странице, кладётся в тот же `sprintReportCache`.
-5. Если вкладки нет — страница показывает подсказку «Откройте вкладку Jira и
-   нажмите Дотянуть».
+**Гипотеза опровергнута официальной документацией.** Rate limit в Jira Cloud
+считается **per-tenant и per-resource-path**, а не на пользователя и не на способ
+аутентификации:
 
-**Оговорка, зафиксированная при груминге.** У Atlassian Cloud rate limit считается
-на пользователя, а не на способ аутентификации; cookie-сессия и API-токен под одним
-аккаунтом делят бюджет. Выигрыш возможен (браузерным запросам иногда достаётся
-более щедрый бюджет), но это наблюдение, а не документированная гарантия. Поэтому
-слой 3 — аварийный, а не основной. Если на практике он не даёт выигрыша, его можно
-удалить, не трогая слои 1–2.
+> *"It is enforced per tenant and per API/resource path"*
+> *"The burst limit is independent of the number of users in the tenant; adding
+> more users does not increase this per second allowance."*
+> — [developer.atlassian.com/cloud/jira/platform/rate-limiting/](https://developer.atlassian.com/cloud/jira/platform/rate-limiting/)
+
+Следствия:
+
+- cookie-сессия и API-токен делят **один и тот же** бюджет по пути `sprintreport`;
+  смена способа авторизации не даёт ничего;
+- бюджет расходуется всем трафиком тенанта по этому пути — включая сам UI Jira,
+  открытый у коллег. Наша доля запросов — единственное, чем мы управляем.
+
+Единственного официального утверждения про типы аутентификации —
+*"API token-based traffic is not affected by this change, and will continue to be
+governed by existing burst rate limits"* — недостаточно: оно про неприменение новой
+points-модели к токенам, а не про послабления для браузера.
+
+**Вывод:** слой 3 не реализуем. Задача решается исключительно сокращением числа
+запросов (слой 1) и вежливостью оставшихся (слой 2). Существующий режим
+`credentials:'include'` в `buildRequest` остаётся как есть — он нужен content-script'у
+на странице Jira, но не как средство обхода лимитов.
+
+Заметка на будущее: заголовков `X-RateLimit-*` в ответах нашего инстанса при обычной
+нагрузке **не наблюдалось** (замер 2026-07-27, 6 последовательных запросов) — они
+приходят при приближении к лимиту и в 429-ответах. Обработка `Retry-After` уже
+реализована в `retryDelayMs` и соответствует рекомендации Atlassian (экспонента,
+jitter ×0.7–1.3).
 
 ## Обработка ошибок
 
@@ -127,8 +174,11 @@ local:sprintListCache    = { [rapidViewId]: { updatedAt, sprints: GhSprint[] } }
 
 - **диффер кеша:** при данном списке спринтов и содержимом кеша — какие `sprintId`
   запросить (пустой кеш, полный кеш, частичный, кеш с лишними спринтами);
-- **ранняя остановка:** обход останавливается на первом спринте раньше `SINCE_ISO`;
-  спринт без `isoStartDate` не ломает обход;
+- **фильтр списка:** отсев по `originBoardId !== rapidViewId` (реальный кейс:
+  `Web-2023PI1-23.1.6` с `originBoardId: 16` в выдаче доски 80) и по
+  `startDate < SINCE_ISO`; спринт без `startDate` не ломает обход;
+- **пагинация:** цикл завершается по `isLast`, а не по `total` (который может
+  отсутствовать); `maxResults` фиксирован 50;
 - **деградация конкурентности:** 5 → 2 → 1, обратно не растёт;
 - **вытеснение:** при превышении лимита кеша удаляются самые старые спринты.
 
@@ -136,22 +186,75 @@ local:sprintListCache    = { [rapidViewId]: { updatedAt, sprints: GhSprint[] } }
 
 # Часть 2. Метрики здоровья спринта
 
-## Источник данных
+## Источник данных — ПРОВЕРЕНО НА ЖИВОМ API
 
 Всё считается из уже загружаемого `sprintreport` — **ноль дополнительных запросов**.
 
+Замер выполнен 2026-07-27 через Playwright на боевом `tvbet.atlassian.net`,
+доска 80, спринт 9465 (ELCAS-26.7.1). Полный список ключей `contents`:
+
+```
+allIssuesEstimateSum                              object
+completedIssues                                   array[20]
+completedIssuesEstimateSum                        object
+completedIssuesInitialEstimateSum                 object
+issueKeysAddedDuringSprint                        object      ← СЛОВАРЬ, не массив
+issuesCompletedInAnotherSprint                    array[1]
+issuesCompletedInAnotherSprintEstimateSum         object
+issuesCompletedInAnotherSprintInitialEstimateSum  object
+issuesNotCompletedEstimateSum                     object
+issuesNotCompletedInCurrentSprint                 array[6]
+issuesNotCompletedInitialEstimateSum              object
+puntedIssues                                      array[0]
+puntedIssuesEstimateSum                           object
+puntedIssuesInitialEstimateSum                    object
+```
+
 Добавляются в `api/jira/dto.ts` (`GhSprintReportDto.contents`):
 
-| Поле | Смысл |
-|---|---|
-| `puntedIssues?: GhReportIssue[]` | задачи, выброшенные из спринта после старта |
-| `issueKeysAddedDuringSprint?: Record<string, boolean>` | ключи задач, добавленных после старта |
-| `issuesNotCompletedInitialEstimateSum?: GhEstimateSum` | carryover в оценке на старте |
+| Поле | Тип | Статус |
+|---|---|---|
+| `puntedIssues?: GhReportIssue[]` | массив | ✅ подтверждено |
+| `puntedIssuesEstimateSum?: GhEstimateSum` | `{value?, text}` | ✅ подтверждено |
+| `issueKeysAddedDuringSprint?: Record<string, boolean>` | **объект-словарь** | ✅ подтверждено |
+| `issuesNotCompletedEstimateSum?: GhEstimateSum` | `{value?, text}` | ✅ подтверждено |
+| `issuesNotCompletedInitialEstimateSum?: GhEstimateSum` | `{value?, text}` | ✅ подтверждено |
+| `issuesCompletedInAnotherSprint?: GhReportIssue[]` | массив | ✅ подтверждено |
 
-Эти поля Jira greenhopper штатно отдаёт (ими рисуются блоки «Issues Removed From
-Sprint» и звёздочка «added after sprint start» в родном Sprint Report).
-**Проверить на живом API при реализации.** Если поле отсутствует — соответствующее
-правило отдаёт статус `no-data`, а не `ok` (см. «Деградация» ниже).
+### Три ловушки, найденные замером
+
+**1. `issueKeysAddedDuringSprint` — словарь, не массив.**
+Реальное значение: `{"ELCAS-12646": true}`. Разбор только через
+`Object.keys(c.issueKeysAddedDuringSprint ?? {})`. Часть источников в интернете
+(библиотека `jira-client`) типизирует его как `string[]` — это баг библиотеки.
+
+**2. Пустые суммы приходят БЕЗ поля `value`.**
+При отсутствии punted-задач: `puntedIssuesEstimateSum: { "text": "null" }` — ключа
+`value` нет вообще, `text` содержит **строку** `"null"`. Обязателен `?? 0`; проверка
+вида `sum.value === null` не сработает, а `Number(sum.text)` даст `NaN`.
+
+**3. `labels` в элементах ЕСТЬ** (вопреки части внешних источников).
+Проверено: `labels: ["CAP_Product", "template"]`. Текущий CAP-расчёт корректен.
+Также реально присутствуют `parentId`/`parentKey`, `typeHierarchyLevel`, `sprintIds`,
+`flagged`, `epicField` — их можно использовать без дополнительных запросов.
+
+### Замер по 5 последним спринтам ELCAS
+
+| Спринт | added | completed curr/init | carryover SP | punted |
+|---|---|---|---|---|
+| 26.5.1 | 4 | 94 / 87 (+8%) | 8 | 0 |
+| 26.5.2 | **9** | 89 / 65 (**+37%**) | **25** | 0 |
+| 26.6.1 | 1 | 68 / 62 (+10%) | 21 | 0 |
+| 26.6.2 | 3 | 79 / 74 (+7%) | 12 | 0 |
+| 26.7.1 | 1 | 66 / 64 (+3%) | 22 | 0 |
+
+Метрики работоспособны и сразу выделяют аномалию: 26.5.2 (9 вбросов, +37% роста
+оценок, 25 SP переноса) нарушает три правила из пяти. Пороги 10%/20% его ловят.
+
+`puntedIssues` во всех пяти спринтах пуст — команда действительно не выкидывает
+задачи. Правило №5 будет давать `ok`, что является корректным результатом, а не
+отсутствием данных. Проверить логику на спринте с непустым `puntedIssues` в других
+досках при реализации.
 
 ## Пять правил
 
@@ -192,33 +295,67 @@ interface RuleResult {
 
 **Правило:** не более 20%.
 
-**Формула:** `carryoverSp / (completedSp + carryoverSp)`.
+**Формула:** `issuesNotCompletedEstimateSum / (completedIssuesEstimateSum + issuesNotCompletedEstimateSum)`.
+
+Поле `issuesNotCompletedEstimateSum` подтверждено замером — суммировать carryover
+вручную по задачам не требуется (текущий код в `getSprintOutcomes`, `index.ts:151`,
+делает это вручную; можно упростить).
 
 **Почему такой знаменатель:** это весь объём, за который команда взялась. Деление
 только на `completedSp` даёт взрыв метрики при плохом спринте (сделали 5 SP,
 перенесли 20 → 400%), что делает число нечитаемым именно тогда, когда оно важнее всего.
 
+**Замечание о `issuesCompletedInAnotherSprint`.** Замер показал, что это поле
+непусто почти всегда (1–2 задачи за спринт): задачи, взятые в этот спринт, но
+закрытые в другом. Формально это тоже форма переноса, но Jira не считает их ни
+в completed, ни в notCompleted текущего спринта. В знаменатель их **не включаем** —
+иначе разойдёмся с числами родного Sprint Report, по которым команда сверяется.
+Показываем отдельной справочной строкой при раскрытии спринта.
+
 ### 3. `reestimate` — переоценка взятых задач
 
 **Правило:** не более 10% от объёма спринта.
 
-**Формула:** `(completedCurrent − completedInitial) / completedInitial`.
+**Формула:** сумма `(current − initial)` **по задачам, исключая добавленные после
+старта**, делённая на `completedInitial`.
+
+**Почему не по суммам-агрегатам.** Замер вскрыл двойной счёт: в спринте 9465
+разница `completedIssuesEstimateSum − completedIssuesInitialEstimateSum` = 66 − 64 =
+2 SP, и складывается она из двух задач:
+
+| Задача | initial | current | природа |
+|---|---|---|---|
+| `ELCAS-12441` | 1 | 2 | настоящая переоценка |
+| `ELCAS-12646` | **null** | 1 | **добавлена после старта** (есть в `issueKeysAddedDuringSprint`) |
+
+Задача, добавленная в спринт по ходу, не имеет оценки «на старте», поэтому вся её
+оценка попадает в разницу сумм и выглядит как переоценка. Без исключения таких задач
+правила 3 и 4 считали бы одно и то же событие дважды.
+
+Поэтому правило 3 считается **поштучно** с фильтром
+`!(key in issueKeysAddedDuringSprint)`, а не вычитанием агрегатов. Задачи с
+`initial === null` при этом отсеиваются автоматически.
 
 Это рост оценок задач, которые **уже были** в спринте на старте — сигнал о качестве
-декомпозиции и понимания задач при планировании. В коде уже есть `reestimate()`
-(`App.vue:235`) — поднимается в `core/metrics` как полноценное правило с порогом.
+декомпозиции и понимания задач при планировании. Существующий `reestimate()`
+(`App.vue:235`) считает по агрегатам и потому неточен — заменяется поштучным расчётом.
 
 ### 4. `scope-added` — добавление задач после старта
 
 **Правило:** не более 10% от объёма спринта.
 
-**Формула:** сумма SP задач, чьи ключи есть в `issueKeysAddedDuringSprint`,
-делённая на объём на старте (`allIssuesEstimateSum` минус добавленные).
+**Формула:** сумма `current` SP задач, чьи ключи есть в `issueKeysAddedDuringSprint`,
+делённая на объём на старте (`allIssuesEstimateSum` минус сумма добавленных).
+
+Задачи ищутся во **всех** массивах (`completedIssues`,
+`issuesNotCompletedInCurrentSprint`, `puntedIssues`,
+`issuesCompletedInAnotherSprint`) — добавленная задача может оказаться в любом.
 
 **Почему отдельно от №3:** при груминге решено разделить. Рост оценки взятой задачи
 и вброс новой задачи — разные причины, требующие разных действий: плохая
 декомпозиция против слабой защиты спринта от внешних запросов. Слитая метрика
-скрывает, какой именно разговор нужно вести.
+скрывает, какой именно разговор нужно вести. Замер подтверждает разделимость: в
+26.5.2 было 9 вбросов при +37% роста — обе метрики сработали независимо.
 
 ### 5. `punted` — выброс из спринта после старта
 
@@ -284,9 +421,21 @@ ELCAS-26.6.1  [▓▓▓▓░░░]  68 SP  ↓12%  carry 24%  +15%  +8%  −2
 - пороги ровно на границе: 10.0% не флагает, 10.1% флагает;
 - спринт без 6 предшественников → `insufficient-history`, не `ok`;
 - нулевые знаменатели: спринт с 0 completed SP, с 0 initial SP;
-- отсутствие `puntedIssues` в ответе → `no-data`, не `ok`;
+- **сумма без `value`**: `{"text":"null"}` → 0, не `NaN` (реальная форма пустого
+  `puntedIssuesEstimateSum`);
+- **`issueKeysAddedDuringSprint` как словарь**: `{"K-1":true}` → 1 ключ; `{}` → 0;
+  отсутствие поля → 0;
+- **отсутствие двойного счёта**: задача из `issueKeysAddedDuringSprint` с
+  `initial=null, current=1` попадает в правило 4 и **не** попадает в правило 3
+  (кейс `ELCAS-12646`);
+- отсутствие `puntedIssues` в ответе → `no-data`; пустой массив → `ok`
+  (это разные ситуации);
 - `evidence` содержит правильные ключи задач;
 - медианная база не включает оцениваемый спринт.
+
+**Фикстура для тестов:** реальный срез ответа по спринту 9465 сохранён в
+`src/api/jira/__fixtures__/sprintreport-9465.json` (суммы, словарь добавленных задач,
+по одному элементу из каждого массива). Содержит все три ловушки в натуральном виде.
 
 ---
 
@@ -294,22 +443,55 @@ ELCAS-26.6.1  [▓▓▓▓░░░]  68 SP  ↓12%  carry 24%  +15%  +8%  −2
 
 | Модуль | Изменение |
 |---|---|
-| `api/jira/dto.ts` | +3 поля `GhSprintReportDto.contents` |
-| `api/jira/mappers.ts` | маппинг новых полей в domain |
+| `api/jira/endpoints.ts` | +`boardSprints` (Agile API); удалить `sprintQuery` |
+| `api/jira/dto.ts` | +`AgileSprintPageDto`; +6 полей `GhSprintReportDto.contents` |
+| `api/jira/mappers.ts` | маппинг новых полей в domain, разбор словаря `issueKeysAddedDuringSprint` |
 | `api/jira/client.ts` | адаптивный ограничитель конкурентности |
-| `api/jira/index.ts` | кеш-осведомлённая загрузка, ранняя остановка по дате |
-| `core/domain/sprint-report.ts` | `SprintReportDetail` += `puntedIssues`, `addedDuringSprint`, `carryoverInitialPoints` |
+| `api/jira/index.ts` | пагинация Agile API по `isLast`, фильтр `originBoardId`, кеш-осведомлённая загрузка |
+| `core/domain/sprint-report.ts` | `SprintReportDetail` += `puntedIssues`, `addedIssueKeys`, `carryoverPoints`, `completedInAnotherSprint` |
 | `core/metrics/sprint-health.ts` | **новый** — пять правил, чистые функции |
 | `shared/storage/items.ts` | `sprintReportCache`, `sprintListCache`, `sprintHealthThresholds` |
-| `shared/messaging/protocol.ts` | сообщение фолбэка через вкладку Jira |
-| `entrypoints/background.ts` | обработчик фолбэка (поиск вкладки Jira) |
-| `entrypoints/jira.content/index.ts` | fetch отчётов по cookie-сессии |
 | `components/HealthChips.vue` | **новый** — чипы правил |
 | `entrypoints/options/App.vue` | редактор порогов |
 | `entrypoints/sprint-report/App.vue` | только композиция |
 
+Слой 3 отклонён, поэтому `shared/messaging/protocol.ts`, `entrypoints/background.ts`
+и `entrypoints/jira.content/index.ts` **не затрагиваются**.
+
 Соблюдаются архитектурные правила расширения: `core/` без браузерных API, метрики —
 чистые функции, знание о форме Jira только в `api/jira` (ACL), контракты в `shared/`.
+
+# Риск: зависимость от greenhopper
+
+`sprintreport` — **приватный недокументированный API**. Формального deprecation-
+документа Atlassian нет, но нет и гарантий: официальная позиция в тредах —
+*"for internal use only, the documentation is no longer maintained"*.
+
+**Почему уйти нельзя.** Данные для правил 4 и 5 в публичном API отсутствуют:
+
+- официального Sprint Report endpoint в Jira Cloud **не существует**;
+- `/rest/agile/1.0/sprint/{id}/issue` отдаёт **текущий** состав спринта —
+  выброшенные задачи оттуда невосстановимы;
+- оператора `sprint WAS` в JQL нет: запрос [JRACLOUD-75868](https://jira.atlassian.com/browse/JRACLOUD-75868)
+  *«JQL search for issues added and removed from a sprint»* открыт с 2018 года,
+  1492 голоса, статус «Gathering Interest».
+
+Единственная альтернатива — `expand=changelog` по каждой задаче с ручным разбором
+переходов поля Sprint. Это тот самый N+1, ради устранения которого делается часть 1.
+
+**Прецедент поломки есть:** Atlassian уже переименовывал поле
+`incompletedIssues` → `issuesNotCompletedInCurrentSprint` без уведомления.
+
+**Меры защиты:**
+
+1. Правила 1–3 считаются из полей, которые есть и в официальном API — при поломке
+   greenhopper они продолжат работать.
+2. Правила 4–5 при отсутствии своих полей отдают `no-data`, а не `ok` — молчаливой
+   деградации в «всё хорошо» не будет.
+3. Список спринтов переводится на **официальный** Agile API (часть 1), что снижает
+   площадь зависимости: greenhopper остаётся только там, где незаменим.
+4. Знание о форме ответа изолировано в `api/jira` (ACL) — при изменении контракта
+   правится один слой.
 
 # Вне скоупа
 
