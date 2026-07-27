@@ -122,6 +122,16 @@ describe('ruleReestimate', () => {
     expect(r.evidence?.issueKeys).toEqual(['A']);
   });
 
+  it('в evidence даёт «было → стало» по каждой задаче, а не только прирост', () => {
+    const s = sprint({
+      sprintId: 1,
+      completedIssues: [issue('A', 8, [], 3), issue('B', 5, [], 5)],
+    });
+    const grown = ruleReestimate(s, T).evidence!.issues;
+    // Только выросшие; B (5→5) не попадает.
+    expect(grown).toEqual([{ key: 'A', points: 5, from: 3, to: 8 }]);
+  });
+
   it('НЕ считает переоценкой задачу, добавленную после старта (кейс ELCAS-12646)', () => {
     // Реальный кейс: у добавленной по ходу задачи нет оценки на старте (initial=null),
     // и её SP не должны выглядеть как рост оценок — иначе двойной счёт с scope-added.
@@ -208,7 +218,8 @@ describe('rulePunted', () => {
     const r = rulePunted(s, T);
     expect(r.status).toBe('warn');
     expect(r.value).toBe(2);
-    expect(r.evidence).toEqual({ issueKeys: ['X', 'Y'], points: 5 });
+    expect(r.evidence?.issueKeys).toEqual(['X', 'Y']);
+    expect(r.evidence?.points).toBe(5);
   });
 
   it('порог можно ослабить договорённостью команды', () => {

@@ -29,10 +29,23 @@ export type RuleId =
  */
 export type RuleStatus = 'ok' | 'warn' | 'no-data' | 'insufficient-history';
 
+/** Задача, попавшая в подтверждение правила, с её вкладом в число. */
+export interface EvidenceIssue {
+  key: string;
+  /** SP, которыми задача вошла в метрику (для reestimate — прирост, иначе — её оценка). */
+  points: number;
+  /** Оценка на старте спринта. null — задачи не было на старте. Только для reestimate. */
+  from?: number | null;
+  /** Оценка на закрытии. Только для reestimate. */
+  to?: number;
+}
+
 /** Подтверждающие данные для раскрытия в UI (какие именно задачи дали это число). */
 export interface RuleEvidence {
   issueKeys: string[];
   points: number;
+  /** Детализация по задачам — чтобы UI показал «было → стало», а не только ключи. */
+  issues: EvidenceIssue[];
 }
 
 export interface RuleResult {
@@ -160,6 +173,7 @@ export function ruleCarryover(sprint: SprintReportDetail, t: HealthThresholds): 
     evidence: {
       issueKeys: sprint.notCompletedIssues.map((i) => i.key),
       points: sprint.notCompletedPoints,
+      issues: sprint.notCompletedIssues.map((i) => ({ key: i.key, points: points(i.points) })),
     },
   };
 }
@@ -189,16 +203,18 @@ function allIssues(sprint: SprintReportDetail): SprintReportIssue[] {
 export function ruleReestimate(sprint: SprintReportDetail, t: HealthThresholds): RuleResult {
   let growth = 0;
   let base = 0;
-  const keys: string[] = [];
+  const grown: EvidenceIssue[] = [];
 
   for (const issue of allIssues(sprint)) {
     if (sprint.addedIssueKeys.has(issue.key)) continue; // добавлена после старта → правило 4
     if (issue.initialPoints === null) continue; // не было оценки на старте → база отсутствует
-    const delta = points(issue.points) - points(issue.initialPoints);
-    base += points(issue.initialPoints);
-    if (delta > 0) {
-      growth += delta;
-      keys.push(issue.key);
+    const from = points(issue.initialPoints);
+    const to = points(issue.points);
+    base += from;
+    if (to > from) {
+      growth += to - from;
+      // from/to нужны UI: «было 3 → стало 8» читается, а «+5» требует догадки.
+      grown.push({ key: issue.key, points: +(to - from).toFixed(1), from, to });
     }
   }
 
@@ -211,7 +227,7 @@ export function ruleReestimate(sprint: SprintReportDetail, t: HealthThresholds):
     status: overThreshold(share, t.reestimate) ? 'warn' : 'ok',
     value: share,
     threshold: t.reestimate,
-    evidence: { issueKeys: keys, points: +growth.toFixed(1) },
+    evidence: { issueKeys: grown.map((g) => g.key), points: +growth.toFixed(1), issues: grown },
   };
 }
 
@@ -242,7 +258,11 @@ export function ruleScopeAdded(sprint: SprintReportDetail, t: HealthThresholds):
     status: overThreshold(share, t.scopeAdded) ? 'warn' : 'ok',
     value: share,
     threshold: t.scopeAdded,
-    evidence: { issueKeys: added.map((i) => i.key), points: +addedPoints.toFixed(1) },
+    evidence: {
+      issueKeys: added.map((i) => i.key),
+      points: +addedPoints.toFixed(1),
+      issues: added.map((i) => ({ key: i.key, points: points(i.points) })),
+    },
   };
 }
 
@@ -266,6 +286,7 @@ export function rulePunted(sprint: SprintReportDetail, t: HealthThresholds): Rul
     evidence: {
       issueKeys: sprint.puntedIssues.map((i) => i.key),
       points: +sprint.puntedIssues.reduce((s, i) => s + points(i.points), 0).toFixed(1),
+      issues: sprint.puntedIssues.map((i) => ({ key: i.key, points: points(i.points) })),
     },
   };
 }

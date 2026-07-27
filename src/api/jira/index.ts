@@ -362,7 +362,7 @@ export async function getBoardSprintReportsSince(
   return { sprints, failed, fetched };
 }
 
-export { setJiraAuth } from './client';
-export type { JiraAuth } from './client';
+export { setJiraAuth, setJiraTabTransport, hasJiraAccess } from './client';
+export type { JiraAuth, JiraTabTransport } from './client';
 export { JiraRequestError } from './errors';
 export type { JiraError } from './errors';

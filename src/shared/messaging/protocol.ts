@@ -12,12 +12,36 @@ import { browser, type Browser } from 'wxt/browser';
  * но не друг от друга напрямую (Dependency Inversion).
  */
 
+/**
+ * Результат запроса к Jira через сессию браузера.
+ * `status: 0` — запрос не дошёл (нет вкладки Jira / сеть), тело в `error`.
+ */
+export interface JiraProxyResult {
+  ok: boolean;
+  status: number;
+  /** Тело ответа как текст (парсится вызывающим — background не знает про доменные типы). */
+  body?: string;
+  error?: string;
+}
+
 /** Сообщения, которые UI отправляет в background. */
-export type AppMessage = { type: 'ping' };
+export type AppMessage =
+  | { type: 'ping' }
+  /**
+   * Выполнить GET к Jira ЧЕРЕЗ ОТКРЫТУЮ ВКЛАДКУ Jira (cookie сессии SSO).
+   * Нужен, когда пользователь не заводил API-токен: страница расширения живёт на
+   * chrome-extension://, её fetch куки Jira не отправляет, а content-script на вкладке Jira —
+   * отправляет. `path` — относительный путь вида /rest/agile/1.0/...
+   */
+  | { type: 'jiraFetch'; path: string }
+  /** Есть ли сейчас открытая вкладка Jira (для подсказки в UI). */
+  | { type: 'jiraTabPresent' };
 
 /** Ответы background на каждое сообщение (сопоставлены по type). */
 export interface AppResponseMap {
   ping: { ok: true; ts: number };
+  jiraFetch: JiraProxyResult;
+  jiraTabPresent: { present: boolean };
 }
 
 type MessageType = AppMessage['type'];

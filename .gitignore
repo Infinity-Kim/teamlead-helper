@@ -38,3 +38,8 @@ e2e/
 *.sln
 *.sw?
 .demo/
+.e2e-profile/
+.e2e-*.mjs
+.e2e-*.png
+.e2e-extid
+.e2e.log

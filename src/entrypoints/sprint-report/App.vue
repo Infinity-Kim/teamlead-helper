@@ -1,6 +1,12 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue';
-import { getBoardSprintReportsSince, setJiraAuth, JiraRequestError } from '@/api/jira';
+import {
+  getBoardSprintReportsSince,
+  setJiraAuth,
+  setJiraTabTransport,
+  JiraRequestError,
+} from '@/api/jira';
+import { sendMessage } from '@/shared/messaging';
 import {
   jiraCreds,
   TEAM_BOARDS,
@@ -59,6 +65,9 @@ const memCache = new Map<number, TeamReport>();
 
 /** Пороги правил из настроек (читаются один раз при монтировании). */
 const thresholds = ref<HealthThresholds | null>(null);
+
+/** Данные идут через вкладку Jira (без токена) — показываем это пользователю. */
+const usingTab = ref(false);
 
 /** Собрать TeamReport из сырья спринтов. */
 function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number): TeamReport {
@@ -209,13 +218,25 @@ async function load(force = false) {
   loading.value = true;
   error.value = null;
   try {
+    // Два пути в Jira. Токен — основной (работает всегда). Без токена идём через ОТКРЫТУЮ
+    // вкладку Jira: там живут cookie сессии SSO, и запросы делает content-script.
     const creds = await jiraCreds.getValue();
-    if (!creds) {
-      error.value =
-        'Не заданы данные Jira. Откройте настройки расширения и введите email + API-токен.';
-      return;
+    if (creds) {
+      setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
+      setJiraTabTransport(null);
+      usingTab.value = false;
+    } else {
+      const { present } = await sendMessage('jiraTabPresent');
+      if (!present) {
+        error.value =
+          'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
+          'либо укажите email и API-токен в настройках расширения.';
+        return;
+      }
+      setJiraAuth(null);
+      setJiraTabTransport((path) => sendMessage('jiraFetch', { path }));
+      usingTab.value = true;
     }
-    setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
 
     // 2) Отдаём загрузчику всё, что уже есть — он дотянет только недостающее.
     const cached = force ? new Map<number, SprintReportDetail>() : await readSprintCache();
@@ -284,7 +305,34 @@ function activeEvidence(sid: number) {
   const rule = ruleFilter.value.get(sid);
   if (!rule) return null;
   const res = healthOf(sid).find((r) => r.rule === rule);
-  return res?.evidence?.issueKeys.length ? { rule, ...res.evidence } : null;
+  return res?.evidence?.issues.length ? { rule, result: res, ...res.evidence } : null;
+}
+
+/**
+ * Задачи выбранного правила КАК КАРТОЧКИ: с заголовком, типом, статусом и вкладом в метрику.
+ * Ищем во всех массивах спринта — punted/added задачи не лежат в completedIssues.
+ */
+function evidenceCards(s: SprintReportDetail) {
+  const ev = activeEvidence(s.sprintId);
+  if (!ev) return [];
+  const pool = new Map<string, SprintReportIssue>();
+  for (const i of [
+    ...s.completedIssues,
+    ...s.notCompletedIssues,
+    ...s.puntedIssues,
+    ...s.completedInAnotherSprintIssues,
+  ]) {
+    if (!pool.has(i.key)) pool.set(i.key, i);
+  }
+  return ev.issues.map((e) => ({ ...e, issue: pool.get(e.key) ?? null }));
+}
+
+/** Подпись вклада задачи в метрику: для переоценки «3 → 8 SP», иначе просто SP. */
+function contribution(e: { points: number; from?: number | null; to?: number }): string {
+  if (typeof e.to === 'number' && typeof e.from === 'number') {
+    return `${fmtNum(e.from)} → ${fmtNum(e.to)} SP  (+${fmtNum(e.points)})`;
+  }
+  return `${fmtNum(e.points)} SP`;
 }
 
 /** Короткие имена правил для сводки в шапке. */
@@ -438,6 +486,16 @@ const CAP_SLICES_ALL = CAP_SLICES;
         </span>
       </div>
 
+      <!-- Режим без токена: данные идут через открытую вкладку Jira -->
+      <div
+        v-if="usingTab && !error"
+        class="mb-4 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
+      >
+        <span class="inline-block size-1.5 rounded-full bg-emerald-500"></span>
+        Работаем через открытую вкладку Jira (сессия браузера) — API-токен не нужен. Если закрыть
+        её, добавьте токен в настройках.
+      </div>
+
       <!-- Плашка частичных данных: часть спринтов не догрузилась (rate-limit/сеть) -->
       <div
         v-if="!loading && !error && report && report.failed > 0"
@@ -484,11 +542,15 @@ const CAP_SLICES_ALL = CAP_SLICES;
             <span class="font-mono text-xs text-slate-400">board {{ report.rapidViewId }}</span>
             <span class="ml-auto text-xs text-slate-500 dark:text-slate-400">
               <template v-if="report.velocity.median !== null">
-                velocity (посл. {{ report.velocity.count }}):
-                <b class="text-slate-700 dark:text-slate-200">
-                  медиана {{ fmtNum(report.velocity.median) }} SP
-                </b>
-                · среднее {{ fmtNum(report.velocity.mean!) }} SP
+                <span
+                  title="Медиана и среднее completed SP по последним спринтам, ВКЛЮЧАЯ самый свежий. Правило «Скорость» у каждого спринта сравнивает его с медианой ПРЕДЫДУЩИХ — поэтому там другое число."
+                >
+                  velocity (посл. {{ report.velocity.count }}, вкл. текущий):
+                  <b class="text-slate-700 dark:text-slate-200">
+                    медиана {{ fmtNum(report.velocity.median) }} SP
+                  </b>
+                  · среднее {{ fmtNum(report.velocity.mean!) }} SP
+                </span>
               </template>
               <template v-else>velocity: нет данных</template>
             </span>
@@ -706,28 +768,74 @@ const CAP_SLICES_ALL = CAP_SLICES;
                       {{ visibleIssues(s).length }} из {{ s.completedIssues.length }} задач
                     </div>
 
-                    <!-- Задачи, на которых основано число выбранного правила -->
+                    <!-- Задачи, на которых основано число выбранного правила — карточками -->
                     <div
                       v-if="activeEvidence(s.sprintId)"
-                      class="border-b border-slate-100 bg-amber-50/50 px-4 py-2 dark:border-slate-800 dark:bg-amber-950/20"
+                      class="border-b border-amber-200 bg-amber-50/60 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/20"
                     >
-                      <div class="mb-1 text-[11px] font-medium text-slate-600 dark:text-slate-300">
-                        {{ RULE_LABEL[activeEvidence(s.sprintId)!.rule] }}:
-                        {{ activeEvidence(s.sprintId)!.issueKeys.length }} зад. ·
-                        {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
-                      </div>
-                      <div class="flex flex-wrap gap-1.5">
-                        <a
-                          v-for="key in activeEvidence(s.sprintId)!.issueKeys"
-                          :key="key"
-                          :href="`https://tvbet.atlassian.net/browse/${key}`"
-                          target="_blank"
-                          rel="noopener"
-                          class="font-mono text-[11px] text-indigo-600 hover:underline dark:text-indigo-400"
+                      <div
+                        class="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-slate-700 dark:text-slate-200"
+                      >
+                        <span>{{ RULE_LABEL[activeEvidence(s.sprintId)!.rule] }}</span>
+                        <span class="font-normal text-slate-500 dark:text-slate-400">
+                          {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
+                          {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
+                          <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
+                            · {{ Math.round(Math.abs(activeEvidence(s.sprintId)!.result.value!) * 100) }}%
+                            при пороге
+                            {{ Math.round(activeEvidence(s.sprintId)!.result.threshold * 100) }}%
+                          </template>
+                        </span>
+                        <button
+                          type="button"
+                          class="ml-auto text-[11px] font-normal text-indigo-600 hover:underline dark:text-indigo-400"
+                          @click="onRuleClick(s.sprintId, activeEvidence(s.sprintId)!.rule)"
                         >
-                          {{ key }}
-                        </a>
+                          × закрыть
+                        </button>
                       </div>
+
+                      <ul class="grid gap-1.5 sm:grid-cols-2">
+                        <li
+                          v-for="e in evidenceCards(s)"
+                          :key="e.key"
+                          class="rounded-md border border-amber-200/70 bg-white px-2.5 py-2 dark:border-amber-900/50 dark:bg-slate-900"
+                        >
+                          <div class="flex items-baseline gap-2">
+                            <a
+                              :href="`https://tvbet.atlassian.net/browse/${e.key}`"
+                              target="_blank"
+                              rel="noopener"
+                              class="font-mono text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                            >
+                              {{ e.key }}
+                            </a>
+                            <span
+                              class="ml-auto whitespace-nowrap font-mono text-[11px] font-semibold tabular-nums text-amber-700 dark:text-amber-300"
+                            >
+                              {{ contribution(e) }}
+                            </span>
+                          </div>
+                          <div class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300">
+                            {{ e.issue?.summary || '—' }}
+                          </div>
+                          <div
+                            v-if="e.issue"
+                            class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400"
+                          >
+                            <span>{{ e.issue.type }}</span>
+                            <span
+                              class="rounded px-1 py-0.5 font-medium"
+                              :class="statusTone(e.issue.status)"
+                            >
+                              {{ e.issue.status }}
+                            </span>
+                            <span v-if="capLabel(e.issue)" class="font-mono text-violet-500">
+                              {{ capLabel(e.issue) }}
+                            </span>
+                          </div>
+                        </li>
+                      </ul>
                     </div>
 
                     <table class="w-full text-sm">

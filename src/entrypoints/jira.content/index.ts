@@ -98,6 +98,23 @@ export default defineContentScript({
     };
     mark('main-start');
 
+    /**
+     * Прокси Jira-запросов для страниц расширения: здесь мы НА домене Jira, поэтому
+     * fetch с credentials:'include' отправляет cookie сессии SSO — и API-токен не нужен.
+     * Страница отчёта живёт на chrome-extension:// и сама так не может.
+     */
+    browser.runtime.onMessage.addListener(
+      (msg: { type?: string; path?: string }, _sender, sendResponse) => {
+        if (msg?.type !== 'jiraFetch' || typeof msg.path !== 'string') return false;
+        fetch(msg.path, { credentials: 'include', headers: { Accept: 'application/json' } })
+          .then(async (r) => {
+            sendResponse({ ok: r.ok, status: r.status, body: await r.text() });
+          })
+          .catch((e) => sendResponse({ ok: false, status: 0, error: String(e) }));
+        return true; // ответ асинхронный — держим канал открытым
+      },
+    );
+
     const isBacklog = () => /\/boards\/\d+\/backlog/.test(location.pathname);
 
     /** rapidViewId текущей доски из URL (/boards/<ID>/backlog). null — не на backlog-доске. */

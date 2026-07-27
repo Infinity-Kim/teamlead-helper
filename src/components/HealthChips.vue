@@ -43,7 +43,9 @@ function hint(r: RuleResult): string {
   }
   switch (r.rule) {
     case 'velocity-drop':
-      return `Скорость ${r.value! > 0 ? 'ниже' : 'выше'} медианы предыдущих спринтов на ${pct(Math.abs(r.value!))} (медиана ${r.baseline} SP). Порог: не ниже −${pct(r.threshold)}`;
+      // Явно говорим «ПРЕДЫДУЩИХ, без этого спринта»: в шапке страницы медиана считается
+      // по последним 6 ВКЛЮЧАЯ текущий, и без уточнения два числа выглядят противоречиво.
+      return `Скорость ${r.value! > 0 ? 'ниже' : 'выше'} на ${pct(Math.abs(r.value!))} базы ${r.baseline} SP — это медиана 6 ПРЕДЫДУЩИХ спринтов (сам спринт в базу не входит, иначе он влиял бы на собственный порог). Порог: не ниже −${pct(r.threshold)}`;
     case 'carryover':
       return `Перенесено ${pct(r.value!)} от взятого объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Порог: не более ${pct(r.threshold)}`;
     case 'reestimate':

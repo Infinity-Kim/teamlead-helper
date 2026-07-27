@@ -99,6 +99,33 @@ export function setJiraAuth(auth: JiraAuth | null): void {
   activeAuth = auth;
 }
 
+/**
+ * Транспорт «через вкладку Jira»: выполняет GET чужими руками (content-script на домене Jira,
+ * cookie сессии SSO) и отдаёт распарсенный JSON. Позволяет работать БЕЗ API-токена.
+ *
+ * Ставится страницей расширения (она умеет слать сообщения в background); в самом api/jira
+ * знания о messaging нет — только функция нужной формы. Инверсия зависимостей: слой api
+ * не тянет за собой browser.runtime.
+ */
+export type JiraTabTransport = (path: string) => Promise<{
+  ok: boolean;
+  status: number;
+  body?: string;
+  error?: string;
+}>;
+
+let tabTransport: JiraTabTransport | null = null;
+
+/** Включить фолбэк «через вкладку Jira». null — выключить. */
+export function setJiraTabTransport(transport: JiraTabTransport | null): void {
+  tabTransport = transport;
+}
+
+/** Есть ли хоть какой-то способ ходить в Jira (токен или вкладка). */
+export function hasJiraAccess(): boolean {
+  return activeAuth !== null || tabTransport !== null;
+}
+
 /** Собрать (url, headers) под текущий режим: Basic-auth абсолютный ИЛИ куки относительный. */
 function buildRequest(path: string): { url: string; headers: HeadersInit; credentials: RequestCredentials } {
   if (activeAuth) {
@@ -118,6 +145,11 @@ function buildRequest(path: string): { url: string; headers: HeadersInit; creden
  * content-script на странице Jira, куки SSO. Режим выбирается наличием setJiraAuth. Слой: api/jira.
  */
 export async function jiraGetJson<T>(path: string): Promise<T> {
+  // Нет токена, но есть вкладка Jira — идём через неё (cookie сессии вместо Basic auth).
+  if (!activeAuth && tabTransport) {
+    return jiraGetViaTab<T>(path);
+  }
+
   const { url, headers, credentials } = buildRequest(path);
   let res: Response;
   try {
@@ -144,6 +176,34 @@ export async function jiraGetJson<T>(path: string): Promise<T> {
 
   try {
     return (await res.json()) as T;
+  } catch (e) {
+    throw new JiraRequestError({ kind: 'network', message: `bad json: ${e}` });
+  }
+}
+
+/**
+ * GET через вкладку Jira. Коды ответа трактуем так же, как в прямом режиме, чтобы
+ * вызывающий не различал транспорты. Отсутствие вкладки — терминальная ошибка
+ * (`not-configured`): ретраить бессмысленно, пользователю нужно открыть Jira.
+ */
+async function jiraGetViaTab<T>(path: string): Promise<T> {
+  const res = await tabTransport!(path);
+
+  if (!res.ok && res.status === 0) {
+    throw new JiraRequestError({ kind: 'not-configured' });
+  }
+  if (res.status === 401 || res.status === 403) {
+    throw new JiraRequestError({ kind: 'unauthorized' });
+  }
+  if (res.status === 429) {
+    reportRateLimited();
+    throw new JiraRequestError({ kind: 'rate-limited' });
+  }
+  if (!res.ok) {
+    throw new JiraRequestError({ kind: 'server', status: res.status });
+  }
+  try {
+    return JSON.parse(res.body ?? '') as T;
   } catch (e) {
     throw new JiraRequestError({ kind: 'network', message: `bad json: ${e}` });
   }

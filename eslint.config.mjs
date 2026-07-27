@@ -14,7 +14,16 @@ configureVueProject({ rootDir: import.meta.dirname });
 export default defineConfigWithVueTs(
   // Что НЕ линтим.
   {
-    ignores: ['.wxt/**', '.output/**', 'dist/**', 'node_modules/**', 'stats*.html'],
+    ignores: [
+      '.wxt/**',
+      '.output/**',
+      'dist/**',
+      'node_modules/**',
+      'stats*.html',
+      // Локальные инструменты разработчика (запуск расширения в браузере для ручной проверки):
+      // Node-скрипты вне сборки расширения, в git не попадают.
+      '.e2e-*.mjs',
+    ],
   },
 
   // WXT-globals должны идти раньше правил, иначе авто-импорты дадут no-undef.
