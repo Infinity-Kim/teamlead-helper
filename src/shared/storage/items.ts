@@ -53,22 +53,48 @@ export const TEAM_BOARDS: ReadonlyArray<{ team: string; rapidViewId: number }> =
 ];
 
 /**
- * Кэш детальных sprint-отчётов по командам (для страницы sprint-report).
- * local: — данные объёмные (списки задач), не для sync. Пишет content-script на Jira
- * (там куки сессии работают), читает страница sprint-report. `updatedAt` — свежесть кэша.
+ * Кэш детальных sprint-отчётов, ПО СПРИНТАМ (не по доскам) и БЕЗ TTL.
+ *
+ * Закрытый спринт неизменен — его отчёт можно держать вечно, поэтому кэшируем поштучно:
+ * при открытии страницы догружаются только новые спринты (1–2 раз в две недели) вместо
+ * всех 83 закрытых спринтов доски. Частично добытые данные тоже сохраняются — упавший
+ * из-за rate-limit спринт дотянется в следующий раз, а не потеряется.
+ *
+ * Ключ — sprintId (глобально уникален в Jira), поэтому разделения по доскам не требуется.
+ * local: — данные объёмные (списки задач), не для sync.
  */
-export interface SprintReportsCache {
-  updatedAt: number; // Date.now()
-  boards: Array<{
-    team: string;
-    rapidViewId: number;
-    sprints: SprintReportDetail[];
-  }>;
+export interface SprintReportCacheEntry {
+  detail: SprintReportDetail;
+  /** Когда положили — для вытеснения самых старых при переполнении. */
+  cachedAt: number;
 }
-export const sprintReportsCache = storage.defineItem<SprintReportsCache | null>(
-  'local:sprintReportsCache',
-  { fallback: null },
+export const sprintReportCache = storage.defineItem<Record<string, SprintReportCacheEntry>>(
+  'local:sprintReportCache',
+  { fallback: {} },
 );
+
+/**
+ * Максимум спринтов в кэше. ~8 кварталов × 6 спринтов × 3 команды ≈ 144, берём с запасом.
+ * При переполнении вытесняются самые давно закэшированные (chrome.storage.local ~10 МБ).
+ */
+export const SPRINT_CACHE_LIMIT = 200;
+
+/**
+ * Кэш СПИСКА спринтов доски (Agile API) — с TTL, в отличие от отчётов: список меняется
+ * при каждом закрытии спринта, а сами отчёты закрытых спринтов — никогда.
+ */
+export interface SprintListCacheEntry {
+  updatedAt: number;
+  /** Сырые спринты Agile API: id + даты. Хватает, чтобы решить, что догружать. */
+  sprints: Array<{ id: number; name: string; startDate?: string }>;
+}
+export const sprintListCache = storage.defineItem<Record<string, SprintListCacheEntry>>(
+  'local:sprintListCache',
+  { fallback: {} },
+);
+
+/** Свежесть списка спринтов. Спринты закрываются раз в 2 недели — 15 минут с запасом. */
+export const SPRINT_LIST_TTL_MS = 15 * 60 * 1000;
 
 /** Сколько последних закрытых спринтов брать для медианы velocity (рекомендуемый capacity). */
 export const sprintHistoryCount = storage.defineItem<number>('sync:sprintHistoryCount', {
@@ -111,3 +137,39 @@ export const statusConfig = storage.defineItem<StatusConfig>('sync:statusConfig'
     doneStatuses: ['Готово', 'Done', 'DoD/Release', 'Closed'],
   },
 });
+
+/**
+ * Пороги правил «здоровья спринта». Настраиваются в options, а не захардкожены: пороги —
+ * это командная договорённость, а не физическая константа, и у ELCAS/POC/Web они могут
+ * отличаться. Хардкод сделал бы метрику неоспоримой, что для планировочного (а не
+ * отчётного) инструмента вредно — команда должна иметь возможность обсудить и сдвинуть порог.
+ *
+ * Дефолты — из формулировки задачи пользователя.
+ */
+export interface SprintHealthThresholds {
+  /** Просадка velocity от медианы предыдущих спринтов, % (10 = «не ниже −10%»). */
+  velocityDropPct: number;
+  /** Доля переноса SP от взятого объёма, % (20 = «не более 20%»). */
+  carryoverPct: number;
+  /** Рост оценок УЖЕ ВЗЯТЫХ задач от объёма на старте, %. */
+  reestimatePct: number;
+  /** Объём задач, добавленных после старта, от объёма на старте, %. */
+  scopeAddedPct: number;
+  /** Сколько задач допустимо выбросить из спринта после старта (0 = ни одной). */
+  puntedCount: number;
+  /** Размер окна для базы velocity (спринтов). */
+  velocityWindow: number;
+}
+export const sprintHealthThresholds = storage.defineItem<SprintHealthThresholds>(
+  'sync:sprintHealthThresholds',
+  {
+    fallback: {
+      velocityDropPct: 10,
+      carryoverPct: 20,
+      reestimatePct: 10,
+      scopeAddedPct: 10,
+      puntedCount: 0,
+      velocityWindow: 6,
+    },
+  },
+);

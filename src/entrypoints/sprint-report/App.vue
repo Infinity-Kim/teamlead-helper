@@ -5,8 +5,9 @@ import {
   jiraCreds,
   TEAM_BOARDS,
   boardConfig,
-  sprintReportsCache,
-  type SprintReportsCache,
+  sprintReportCache,
+  sprintHealthThresholds,
+  SPRINT_CACHE_LIMIT,
 } from '@/shared/storage';
 import type { SprintReportDetail, SprintReportIssue, CapSlice } from '@/core/domain';
 import {
@@ -14,12 +15,20 @@ import {
   sprintCapBreakdown,
   velocitySummary,
   issueInSlice,
+  healthBySprint,
+  healthSummary,
+  toThresholds,
   CAP_SLICES,
   type QuarterGroup,
   type VelocitySummary,
   type CapBreakdown,
+  type HealthThresholds,
+  type RuleId,
+  type RuleResult,
+  type RuleSummary,
 } from '@/core/metrics';
 import { BUCKET_COLORS } from '@/components/ads-tokens';
+import HealthChips from '@/components/HealthChips.vue';
 
 /**
  * Спринты берём со стартом от Q4 2025 — раньше CAP-метки в Jira не проставлялись
@@ -28,8 +37,6 @@ import { BUCKET_COLORS } from '@/components/ads-tokens';
 const SINCE_ISO = '2025-10-01';
 /** Окно для average velocity. */
 const VELOCITY_WINDOW = 6;
-/** Свежесть кеша: старше — перезагружаем из сети (закрытые спринты меняются нечасто). */
-const CACHE_TTL_MS = 30 * 60 * 1000;
 
 /** Отчёт одной команды: сырьё + предрасчитанные агрегаты. */
 interface TeamReport {
@@ -41,14 +48,22 @@ interface TeamReport {
   sprintCount: number;
   /** Сколько спринтов не загрузилось (частичные данные) — показываем плашку. */
   failed: number;
+  /** Правила здоровья по каждому спринту. */
+  health: Map<number, RuleResult[]>;
+  /** Сводка правил за последние VELOCITY_WINDOW спринтов — для шапки. */
+  healthSummary: RuleSummary[];
 }
 
 /** Кеш готовых отчётов по команде В ПАМЯТИ страницы — мгновенное переключение между командами. */
 const memCache = new Map<number, TeamReport>();
 
+/** Пороги правил из настроек (читаются один раз при монтировании). */
+const thresholds = ref<HealthThresholds | null>(null);
+
 /** Собрать TeamReport из сырья спринтов. */
 function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number): TeamReport {
   const meta = TEAM_BOARDS.find((b) => b.rapidViewId === rvid);
+  const t = thresholds.value;
   return {
     team: meta?.team ?? `board ${rvid}`,
     rapidViewId: rvid,
@@ -57,6 +72,8 @@ function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number
     velocity: velocitySummary(sprints, VELOCITY_WINDOW),
     sprintCount: sprints.length,
     failed,
+    health: t ? healthBySprint(sprints, t) : new Map(),
+    healthSummary: t ? healthSummary(sprints, t, VELOCITY_WINDOW) : [],
   };
 }
 
@@ -121,29 +138,61 @@ function applyReport(r: TeamReport) {
   openQuarters.value = r.quarters[0] ? new Set([r.quarters[0].quarter]) : new Set();
   openSprints.value = new Set();
   sliceFilter.value = new Map();
+  ruleFilter.value = new Map();
 }
 
-/** Прочитать спринты команды из persist-кеша (chrome.storage), если он свежий (в пределах TTL). */
-async function readPersistCache(rvid: number): Promise<TeamReport | null> {
-  const cache = await sprintReportsCache.getValue();
-  if (!cache || Date.now() - cache.updatedAt > CACHE_TTL_MS) return null;
-  const board = cache.boards.find((b) => b.rapidViewId === rvid);
-  if (!board) return null;
-  return buildReport(rvid, board.sprints, 0);
-}
-
-/** Записать спринты команды в persist-кеш (обновив/добавив её запись, освежив updatedAt). */
-async function writePersistCache(rvid: number, team: string, sprints: SprintReportDetail[]) {
-  const prev = await sprintReportsCache.getValue();
-  const boards = (prev?.boards ?? []).filter((b) => b.rapidViewId !== rvid);
-  boards.push({ team, rapidViewId: rvid, sprints });
-  const next: SprintReportsCache = { updatedAt: Date.now(), boards };
-  await sprintReportsCache.setValue(next);
+/** Отчёты закрытых спринтов из persist-кеша. Без TTL: закрытый спринт неизменен. */
+async function readSprintCache(): Promise<Map<number, SprintReportDetail>> {
+  const cache = await sprintReportCache.getValue();
+  const out = new Map<number, SprintReportDetail>();
+  for (const [id, entry] of Object.entries(cache ?? {})) {
+    // addedIssueKeys — Set, а JSON его не переживает: восстанавливаем из массива.
+    out.set(Number(id), reviveDetail(entry.detail));
+  }
+  return out;
 }
 
 /**
- * Загрузить отчёт выбранной команды. force=true (кнопка «Обновить») минует кеш.
- * Порядок без force: память страницы → persist-кеш (TTL) → сеть. После сети — кладём в оба кеша.
+ * chrome.storage сериализует через JSON, поэтому Set превращается в {} — восстанавливаем.
+ * Без этого правило reestimate перестало бы исключать добавленные задачи (двойной счёт).
+ */
+function reviveDetail(d: SprintReportDetail): SprintReportDetail {
+  const keys = d.addedIssueKeys;
+  return {
+    ...d,
+    addedIssueKeys: keys instanceof Set ? keys : new Set(Array.isArray(keys) ? keys : []),
+  };
+}
+
+/**
+ * Дописать свежедобытые отчёты в кеш, вытеснив самые старые при переполнении.
+ * Пишем ДАЖЕ при частичной загрузке — иначе упавший спринт пришлось бы тянуть каждый раз заново.
+ */
+async function writeSprintCache(fetched: ReadonlyMap<number, SprintReportDetail>) {
+  if (fetched.size === 0) return;
+  const cache = { ...(await sprintReportCache.getValue()) };
+  const now = Date.now();
+  for (const [id, detail] of fetched) {
+    // Set не сериализуется в chrome.storage — кладём массивом, обратно поднимаем в reviveDetail.
+    cache[String(id)] = {
+      detail: { ...detail, addedIssueKeys: [...detail.addedIssueKeys] as unknown as Set<string> },
+      cachedAt: now,
+    };
+  }
+  const entries = Object.entries(cache);
+  if (entries.length > SPRINT_CACHE_LIMIT) {
+    entries.sort((a, b) => b[1].cachedAt - a[1].cachedAt);
+    await sprintReportCache.setValue(Object.fromEntries(entries.slice(0, SPRINT_CACHE_LIMIT)));
+    return;
+  }
+  await sprintReportCache.setValue(cache);
+}
+
+/**
+ * Загрузить отчёт выбранной команды. force=true (кнопка «Обновить») минует кеши.
+ *
+ * Отчёты закрытых спринтов кешируются БЕССРОЧНО по sprintId, поэтому сеть трогается только
+ * для новых спринтов: первое открытие ~14 запросов, последующие — 2 (список) + 0–1.
  */
 async function load(force = false) {
   const rvid = selectedRvid.value;
@@ -168,22 +217,13 @@ async function load(force = false) {
     }
     setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
 
-    // 2) Persist-кеш (переживает закрытие вкладки), если свежий и не форсим.
-    if (!force) {
-      const persisted = await readPersistCache(rvid);
-      if (persisted) {
-        memCache.set(rvid, persisted);
-        applyReport(persisted);
-        return;
-      }
-    }
+    // 2) Отдаём загрузчику всё, что уже есть — он дотянет только недостающее.
+    const cached = force ? new Map<number, SprintReportDetail>() : await readSprintCache();
+    const { sprints, failed, fetched } = await getBoardSprintReportsSince(rvid, SINCE_ISO, cached);
 
-    // 3) Сеть.
-    const { sprints, failed } = await getBoardSprintReportsSince(rvid, SINCE_ISO);
     const built = buildReport(rvid, sprints, failed);
     memCache.set(rvid, built);
-    // Persist только полные данные — частичные (failed>0) не кешируем, чтобы «Обновить» дотянул.
-    if (failed === 0) await writePersistCache(rvid, built.team, sprints);
+    await writeSprintCache(fetched);
     applyReport(built);
   } catch (e) {
     error.value =
@@ -209,6 +249,8 @@ function selectTeam(rvid: number) {
 }
 
 onMounted(async () => {
+  // Пороги нужны ДО первого buildReport — иначе правила не посчитаются.
+  thresholds.value = toThresholds(await sprintHealthThresholds.getValue());
   // Дефолтная команда — из настроек доски (boardConfig), если она есть среди TEAM_BOARDS.
   const cfg = await boardConfig.getValue();
   if (TEAM_BOARDS.some((b) => b.rapidViewId === cfg.rapidViewId)) {
@@ -216,6 +258,60 @@ onMounted(async () => {
   }
   await load();
 });
+
+/** Активное правило на КАЖДЫЙ спринт: sprintId → правило (или отсутствует = не выбрано). */
+const ruleFilter = ref<Map<number, RuleId>>(new Map());
+
+/** Правила здоровья конкретного спринта. */
+function healthOf(sprintId: number): RuleResult[] {
+  return report.value?.health.get(sprintId) ?? [];
+}
+
+/**
+ * Клик по чипу правила: раскрыть спринт и показать задачи, на которых основано число.
+ * Повторный клик по тому же правилу — свернуть подсветку.
+ */
+function onRuleClick(sid: number, rule: RuleId) {
+  const next = new Map(ruleFilter.value);
+  if (next.get(sid) === rule) next.delete(sid);
+  else next.set(sid, rule);
+  ruleFilter.value = next;
+  if (next.has(sid) && !openSprints.value.has(sid)) toggleSprint(sid);
+}
+
+/** Подтверждающие данные активного правила спринта (какие задачи дали число). */
+function activeEvidence(sid: number) {
+  const rule = ruleFilter.value.get(sid);
+  if (!rule) return null;
+  const res = healthOf(sid).find((r) => r.rule === rule);
+  return res?.evidence?.issueKeys.length ? { rule, ...res.evidence } : null;
+}
+
+/** Короткие имена правил для сводки в шапке. */
+const SUMMARY_LABEL: Record<RuleId, string> = {
+  'velocity-drop': 'Скорость',
+  carryover: 'Перенос',
+  reestimate: 'Переоценка',
+  'scope-added': 'Добавлено',
+  punted: 'Выброшено',
+};
+
+/** Пояснение к сводке: что считали и за какое окно. */
+function summaryHint(rs: RuleSummary): string {
+  if (rs.evaluated === 0) {
+    return `${SUMMARY_LABEL[rs.rule]}: нет спринтов, для которых правило можно посчитать (мало истории или Jira не отдала данные)`;
+  }
+  return `${SUMMARY_LABEL[rs.rule]}: ${rs.warnCount} из ${rs.evaluated} последних спринтов вне нормы`;
+}
+
+/** Человекочитаемые имена правил — для подписи раскрытого списка. */
+const RULE_LABEL: Record<RuleId, string> = {
+  'velocity-drop': 'Просадка скорости',
+  carryover: 'Перенесено в следующий спринт',
+  reestimate: 'Выросли оценки после старта',
+  'scope-added': 'Добавлено после старта спринта',
+  punted: 'Выброшено из спринта',
+};
 
 const totalSprints = computed(() => report.value?.sprintCount ?? 0);
 
@@ -398,6 +494,35 @@ const CAP_SLICES_ALL = CAP_SLICES;
             </span>
           </div>
 
+          <!-- Сводка здоровья: сколько спринтов из окна вне нормы по каждому правилу -->
+          <div
+            v-if="report.healthSummary.length"
+            class="mb-4 flex flex-wrap gap-x-5 gap-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900"
+          >
+            <div
+              v-for="rs in report.healthSummary"
+              :key="rs.rule"
+              class="flex items-baseline gap-1.5 text-xs"
+              :title="summaryHint(rs)"
+            >
+              <span class="text-slate-500 dark:text-slate-400">{{ SUMMARY_LABEL[rs.rule] }}</span>
+              <template v-if="rs.evaluated > 0">
+                <b
+                  class="tabular-nums"
+                  :class="
+                    rs.warnCount > 0
+                      ? 'text-amber-700 dark:text-amber-300'
+                      : 'text-emerald-700 dark:text-emerald-400'
+                  "
+                >
+                  {{ rs.warnCount }}/{{ rs.evaluated }}
+                </b>
+                <span class="text-slate-400">вне нормы</span>
+              </template>
+              <span v-else class="text-slate-400">нет данных</span>
+            </div>
+          </div>
+
           <!-- Квартальная сводка: ряд кварталов со стек-баром CAP-микса (вариант A) -->
           <div class="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <div
@@ -556,6 +681,15 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         × сбросить
                       </button>
                     </div>
+
+                    <!-- Здоровье спринта: 5 правил (скорость/перенос/переоценка/добавлено/выброшено) -->
+                    <div class="mt-2 pl-7">
+                      <HealthChips
+                        :results="healthOf(s.sprintId)"
+                        :active="ruleFilter.get(s.sprintId) ?? null"
+                        @pick="(rule) => onRuleClick(s.sprintId, rule)"
+                      />
+                    </div>
                   </div>
 
                   <!-- Раскрытый список задач -->
@@ -570,6 +704,30 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     >
                       Фильтр: {{ SLICE_LABEL[sliceFilter.get(s.sprintId)!] }} —
                       {{ visibleIssues(s).length }} из {{ s.completedIssues.length }} задач
+                    </div>
+
+                    <!-- Задачи, на которых основано число выбранного правила -->
+                    <div
+                      v-if="activeEvidence(s.sprintId)"
+                      class="border-b border-slate-100 bg-amber-50/50 px-4 py-2 dark:border-slate-800 dark:bg-amber-950/20"
+                    >
+                      <div class="mb-1 text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                        {{ RULE_LABEL[activeEvidence(s.sprintId)!.rule] }}:
+                        {{ activeEvidence(s.sprintId)!.issueKeys.length }} зад. ·
+                        {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
+                      </div>
+                      <div class="flex flex-wrap gap-1.5">
+                        <a
+                          v-for="key in activeEvidence(s.sprintId)!.issueKeys"
+                          :key="key"
+                          :href="`https://tvbet.atlassian.net/browse/${key}`"
+                          target="_blank"
+                          rel="noopener"
+                          class="font-mono text-[11px] text-indigo-600 hover:underline dark:text-indigo-400"
+                        >
+                          {{ key }}
+                        </a>
+                      </div>
                     </div>
 
                     <table class="w-full text-sm">

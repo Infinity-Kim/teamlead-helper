@@ -13,12 +13,18 @@ import {
   type BucketPoints,
 } from '@/core/metrics';
 import type {
+  AgileSprintDto,
+  AgileSprintPageDto,
   GhBacklogDataDto,
   GhIssueChangelogDto,
-  GhSprintQueryDto,
   GhSprintReportDto,
 } from './dto';
-import { jiraGetJson, jiraGetJsonRetry, mapWithConcurrency } from './client';
+import {
+  currentConcurrency,
+  jiraGetJson,
+  jiraGetJsonRetry,
+  mapWithConcurrency,
+} from './client';
 import { endpoints } from './endpoints';
 import {
   mapIssue,
@@ -29,10 +35,33 @@ import {
   mapSprintReportDetail,
 } from './mappers';
 
-type GhSprint = GhSprintQueryDto['sprints'][number];
+type GhSprint = AgileSprintDto;
 
-/** Одновременных sprintreport-запросов. Ниже burst-лимита Jira (100 GET/с) с большим запасом. */
-const SPRINT_REPORT_CONCURRENCY = 5;
+/**
+ * Все ЗАКРЫТЫЕ спринты доски через ОФИЦИАЛЬНЫЙ Agile API, с датами.
+ * Пагинация по `isLast` (НЕ по `total` — Jira Cloud его часто не отдаёт, JSWCLOUD-22101).
+ *
+ * Фильтр `originBoardId`: доска отдаёт и ЧУЖИЕ спринты — в выдаче board 80 реально приходят
+ * спринты Web (originBoardId=16), которые иначе попали бы в отчёт ELCAS (замер 2026-07-27).
+ * Спринты без originBoardId пропускаем в выдачу: поле опционально, а терять свои спринты
+ * из-за его отсутствия хуже, чем изредка пустить чужой.
+ */
+export async function fetchClosedSprints(rapidViewId: number): Promise<AgileSprintDto[]> {
+  const out: AgileSprintDto[] = [];
+  for (let startAt = 0, guard = 0; guard < MAX_SPRINT_PAGES; guard++) {
+    const page = await jiraGetJsonRetry<AgileSprintPageDto>(
+      endpoints.boardSprints(rapidViewId, startAt),
+    );
+    const values = page.values ?? [];
+    out.push(...values.filter((s) => s.originBoardId === undefined || s.originBoardId === rapidViewId));
+    if (page.isLast || values.length === 0) break;
+    startAt += values.length;
+  }
+  return out;
+}
+
+/** Предохранитель от бесконечной пагинации при неожиданном ответе (50×40 = 2000 спринтов). */
+const MAX_SPRINT_PAGES = 40;
 
 /** Результат orchestration истории спринтов: успешно загруженные + сколько НЕ загрузилось. */
 interface SprintReportsFetch {
@@ -42,24 +71,26 @@ interface SprintReportsFetch {
 }
 
 /**
- * Общий orchestration N+1-запросов истории: sprintquery (список) → последние `limit` спринтов
- * по хронологии (`sequence`, НЕ id) → sprintreport каждого через ПУЛ конкурентности (не Promise.all
- * по всем — иначе десятки одновременных запросов пробивают burst-лимит Jira → 429 → спринты пропадают).
+ * Общий orchestration N+1-запросов истории: список спринтов (Agile API, с датами) → отбор →
+ * sprintreport каждого через ПУЛ конкурентности (не Promise.all по всем — иначе десятки
+ * одновременных запросов пробивают burst-лимит Jira → 429 → спринты пропадают).
  * Каждый запрос с ретраем (Retry-After + backoff). Упавшие НЕ теряются молча — считаются в `failed`.
- * Используют и velocity-медиана, и квартальный баланс, и sprint-отчёт — поэтому helper, а не копипаст.
+ *
+ * `limit` отсекает последние N спринтов ПО ДАТЕ СТАРТА (свежие первыми). Agile API отдаёт
+ * закрытые спринты от старых к новым и параметра сортировки не имеет — поэтому сортируем сами.
  */
 async function fetchRecentSprintReports(
   rapidViewId: number,
   limit: number,
   filter: (s: GhSprint) => boolean = () => true,
 ): Promise<SprintReportsFetch> {
-  const query = await jiraGetJson<GhSprintQueryDto>(endpoints.sprintQuery(rapidViewId));
-  const recent = (query.sprints ?? [])
+  const all = await fetchClosedSprints(rapidViewId);
+  const recent = all
     .filter(filter)
-    .sort((a, b) => b.sequence - a.sequence)
+    .sort((a, b) => Date.parse(b.startDate ?? '') - Date.parse(a.startDate ?? ''))
     .slice(0, Math.max(0, limit));
 
-  const settled = await mapWithConcurrency(recent, SPRINT_REPORT_CONCURRENCY, (sprint) =>
+  const settled = await mapWithConcurrency(recent, currentConcurrency(), (sprint) =>
     jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),
   );
 
@@ -87,19 +118,19 @@ export async function getBoardBacklog(rapidViewId: number): Promise<BoardBacklog
 
 /**
  * Completed story points за последние `lastN` ЗАКРЫТЫХ спринтов доски (для медианы velocity).
- * Источник: sprintquery (список) → sprintreport каждого (completed SP). Deep module.
+ * Источник: Agile API (список закрытых, с датами) → sprintreport каждого. Deep module.
  *
- * Нюансы (изучены на реальном API): закрытые = state==="CLOSED"; хронология по `sequence` (НЕ id);
- * completed SP = contents.completedIssuesEstimateSum.value, где `value` может ОТСУТСТВОВАТЬ → 0.
+ * Нюанс (изучен на реальном API): completed SP = contents.completedIssuesEstimateSum.value,
+ * где `value` может ОТСУТСТВОВАТЬ → 0. Хронология — по startDate из Agile API.
  */
 export async function getSprintVelocities(rapidViewId: number, lastN: number): Promise<number[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
   return ok.map(({ report }) => report.contents?.completedIssuesEstimateSum?.value ?? 0);
 }
 
 /**
- * Спринты для квартального баланса: последние `limit` спринтов (closed + active) с датой старта
- * и распределением completed SP по CAP-бакетам. Deep module (sprintquery + sprintreport каждого).
+ * Спринты для квартального баланса: последние `limit` ЗАКРЫТЫХ спринтов с датой старта
+ * и распределением completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
  *
  * Бакеты считаются по completedIssues[] отчёта (labels + currentEstimateStatistic = SP на закрытии).
  * У активного спринта completedIssues = уже закрытые в нём задачи (план в работе).
@@ -120,7 +151,8 @@ export async function getQuarterSprints(
         id: sprint.id,
         name: sprint.name,
         startDate: report.sprint?.isoStartDate ?? '',
-        state: normalizeSprintState(sprint.state),
+        // Agile API отдаёт state строчными ("closed") — нормализатор ждёт заглавные.
+        state: normalizeSprintState(sprint.state?.toUpperCase()),
         points: { Product: done.Product, Tech: done.Tech, Support: done.Support },
         unlabeledPoints: done.Unlabeled,
         notDonePoints: { Product: notDone.Product, Tech: notDone.Tech, Support: notDone.Support },
@@ -142,7 +174,7 @@ export async function getSprintOutcomes(
   rapidViewId: number,
   lastN: number,
 ): Promise<SprintOutcome[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
   return ok
     .map(({ sprint, report }): SprintOutcome => {
       const c = report.contents;
@@ -243,7 +275,7 @@ export async function getCycleTimeHistory(
   workStatuses: readonly string[],
   doneStatuses: readonly string[],
 ): Promise<number[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
   const allKeys = ok.flatMap(({ report }) =>
     (report.contents?.completedIssues ?? []).map((i) => i.key),
   );
@@ -276,7 +308,7 @@ export async function getBoardSprintReports(
   rapidViewId: number,
   lastN: number,
 ): Promise<SprintReportDetail[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN, (s) => s.state === 'CLOSED');
+  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
   return ok.map(({ report }) => mapSprintReportDetail(report));
 }
 
@@ -293,21 +325,41 @@ export async function getBoardSprintReports(
 export async function getBoardSprintReportsSince(
   rapidViewId: number,
   sinceIso: string,
+  cached: ReadonlyMap<number, SprintReportDetail> = new Map(),
 ): Promise<SprintReportsResult> {
   const since = Date.parse(sinceIso);
-  const { ok, failed } = await fetchRecentSprintReports(
-    rapidViewId,
-    Number.MAX_SAFE_INTEGER,
-    (s) => s.state === 'CLOSED',
+
+  // 1) Список спринтов С ДАТАМИ — 2 запроса вместо 83 (Agile API отдаёт startDate в списке).
+  const wanted = (await fetchClosedSprints(rapidViewId)).filter((s) => {
+    const t = Date.parse(s.startDate ?? '');
+    return !Number.isNaN(t) && t >= since;
+  });
+
+  // 2) Отчёты закрытых спринтов неизменны → тянем только те, которых нет в кеше.
+  const missing = wanted.filter((s) => !cached.has(s.id));
+
+  const settled = await mapWithConcurrency(missing, currentConcurrency(), (sprint) =>
+    jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),
   );
-  const sprints = ok
-    .map(({ report }) => mapSprintReportDetail(report))
-    .filter((d) => {
-      if (!d.isoStartDate) return false;
-      const t = Date.parse(d.isoStartDate);
-      return !Number.isNaN(t) && t >= since;
-    });
-  return { sprints, failed };
+
+  const fetched = new Map<number, SprintReportDetail>();
+  let failed = 0;
+  settled.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      const detail = mapSprintReportDetail(r.value);
+      fetched.set(missing[i].id, detail);
+    } else {
+      failed++;
+    }
+  });
+
+  // 3) Кеш + свежедобытые, от НОВЫХ к старым (порядок, который ожидает UI и velocitySummary).
+  const sprints = wanted
+    .map((s) => fetched.get(s.id) ?? cached.get(s.id))
+    .filter((d): d is SprintReportDetail => d !== undefined)
+    .sort((a, b) => Date.parse(b.isoStartDate ?? '') - Date.parse(a.isoStartDate ?? ''));
+
+  return { sprints, failed, fetched };
 }
 
 export { setJiraAuth } from './client';

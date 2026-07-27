@@ -14,8 +14,14 @@ export async function mapWithConcurrency<T, R>(
 ): Promise<PromiseSettledResult<R>[]> {
   const results: PromiseSettledResult<R>[] = new Array(items.length);
   let next = 0;
+  /** Сколько воркеров сейчас реально в работе — чтобы гасить лишних при снижении лимита. */
+  let active = 0;
+
   const worker = async () => {
+    active++;
     while (next < items.length) {
+      // Лимит мог упасть из-за 429 в другом воркере — тогда лишние завершаются, не добирая items.
+      if (active > Math.min(limit, currentConcurrency()) && active > 1) break;
       const i = next++;
       try {
         results[i] = { status: 'fulfilled', value: await fn(items[i], i) };
@@ -23,10 +29,54 @@ export async function mapWithConcurrency<T, R>(
         results[i] = { status: 'rejected', reason };
       }
     }
+    active--;
   };
-  const pool = Math.max(1, Math.min(limit, items.length));
+
+  const pool = Math.max(1, Math.min(limit, currentConcurrency(), items.length));
   await Promise.all(Array.from({ length: pool }, worker));
+
+  // Воркеры могли выйти досрочно (снижение лимита), оставив хвост необработанным — дожимаем
+  // последовательно, чтобы ни один элемент не пропал молча.
+  while (next < items.length) {
+    const i = next++;
+    try {
+      results[i] = { status: 'fulfilled', value: await fn(items[i], i) };
+    } catch (reason) {
+      results[i] = { status: 'rejected', reason };
+    }
+  }
   return results;
+}
+
+/**
+ * Ступени конкурентности: старт → после первого 429 → после второго.
+ * Rate limit Jira Cloud считается PER-TENANT и PER-RESOURCE-PATH (не на пользователя и не на
+ * способ авторизации) — то есть бюджет делится со всем трафиком тенанта по этому пути,
+ * включая UI Jira у коллег. Единственный рычаг — снижать СВОЮ долю.
+ * https://developer.atlassian.com/cloud/jira/platform/rate-limiting/
+ */
+const CONCURRENCY_STEPS = [5, 2, 1] as const;
+
+/** Текущая ступень. Модульное состояние: живёт столько же, сколько страница. */
+let concurrencyStep = 0;
+
+/**
+ * Разрешённая сейчас конкурентность. Снижается при 429 и НЕ восстанавливается до перезагрузки:
+ * возврат к 5 сразу после успеха даёт пилу «429 → замедлились → успех → 429», потому что Jira
+ * применяет лимиты окнами. Одностороннее понижение предсказуемее.
+ */
+export function currentConcurrency(): number {
+  return CONCURRENCY_STEPS[concurrencyStep];
+}
+
+/** Сообщить ограничителю о 429 — понижает ступень (до минимальной). */
+export function reportRateLimited(): void {
+  concurrencyStep = Math.min(concurrencyStep + 1, CONCURRENCY_STEPS.length - 1);
+}
+
+/** Сброс ступени. Только для тестов — в проде конкурентность намеренно не восстанавливается. */
+export function resetConcurrency(): void {
+  concurrencyStep = 0;
 }
 
 /**
@@ -80,6 +130,8 @@ export async function jiraGetJson<T>(path: string): Promise<T> {
     throw new JiraRequestError({ kind: 'unauthorized' });
   }
   if (res.status === 429) {
+    // Понижаем конкурентность для ВСЕХ последующих пулов — не только для текущего запроса.
+    reportRateLimited();
     const retry = Number(res.headers.get('Retry-After')) * 1000 || undefined;
     throw new JiraRequestError({ kind: 'rate-limited', retryAfterMs: retry });
   }
