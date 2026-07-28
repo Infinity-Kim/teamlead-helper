@@ -7,33 +7,7 @@ import {
   issueBuckets,
   issueInSlice,
 } from './sprint-report-stats';
-import type { SprintReportDetail, SprintReportIssue } from '@/core/domain';
-
-/** Хелпер: задача отчёта с ключевыми полями (остальное — заглушки). */
-function issue(
-  key: string,
-  points: number | null,
-  labels: string[] = [],
-): SprintReportIssue {
-  return { key, summary: key, points, status: 'Готово', type: 'Story', labels };
-}
-
-/** Хелпер: спринт-отчёт. completedPoints по умолчанию = сумма SP completed-задач. */
-function sprint(
-  over: Partial<SprintReportDetail> & { sprintId: number; completedIssues: SprintReportIssue[] },
-): SprintReportDetail {
-  const completedPoints =
-    over.completedPoints ?? over.completedIssues.reduce((s, i) => s + (i.points ?? 0), 0);
-  return {
-    name: over.name ?? `S-${over.sprintId}`,
-    state: 'CLOSED',
-    completedInitialPoints: over.completedInitialPoints ?? completedPoints,
-    notCompletedPoints: 0,
-    notCompletedIssues: [],
-    ...over,
-    completedPoints,
-  };
-}
+import { issue, sprint } from './__test-helpers__/sprint-fixtures';
 
 describe('sprintCapBreakdown', () => {
   it('раскладывает SP по бакетам, % от ВСЕГО completed (вкл. Unlabeled), сумма = 100', () => {

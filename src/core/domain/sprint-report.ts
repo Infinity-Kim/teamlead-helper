@@ -11,6 +11,12 @@ export interface SprintReportIssue {
   summary: string;
   /** SP на момент закрытия (currentEstimate). null — оценка не проставлена. */
   points: number | null;
+  /**
+   * SP на момент СТАРТА спринта (estimateStatistic = BOS, beginning of sprint).
+   * null — оценки на старте не было (типично для задач, добавленных по ходу спринта).
+   * Разница с `points` = переоценка задачи внутри спринта.
+   */
+  initialPoints: number | null;
   status: string;
   type: string;
   /** CAP_*-метка (капаситет-бакет), если проставлена. */
@@ -29,10 +35,29 @@ export interface SprintReportDetail {
   completedPoints: number;
   /** Completed SP на старте (initial). Разница с completedPoints = переоценка. */
   completedInitialPoints: number;
-  /** SP взятых, но не завершённых (carryover). */
+  /** SP взятых, но не завершённых (carryover) — из issuesNotCompletedEstimateSum. */
   notCompletedPoints: number;
+  /** Весь объём спринта в SP (allIssuesEstimateSum) — знаменатель для scope-метрик. */
+  allPoints: number;
   completedIssues: SprintReportIssue[];
   notCompletedIssues: SprintReportIssue[];
+  /** Задачи, выброшенные из спринта после старта. Пусто ≠ отсутствие данных (см. hasPuntedData). */
+  puntedIssues: SprintReportIssue[];
+  /** Взяты в этот спринт, но закрыты в другом (справочно, в carryover НЕ входят). */
+  completedInAnotherSprintIssues: SprintReportIssue[];
+  /**
+   * Ключи задач, добавленных в спринт ПОСЛЕ старта. Множество, а не массив — нужен
+   * O(1) lookup при расчёте переоценки (задачу, добавленную по ходу, нельзя считать
+   * переоценённой: у неё нет оценки «на старте»).
+   */
+  addedIssueKeys: ReadonlySet<string>;
+  /**
+   * Пришло ли поле puntedIssues в ответе. Отличает «выбросов не было» (ok) от
+   * «Jira не отдала данные» (no-data) — без этого метрика молча деградирует в «всё хорошо».
+   */
+  hasPuntedData: boolean;
+  /** Аналогично для issueKeysAddedDuringSprint. */
+  hasAddedData: boolean;
 }
 
 /** Отчёты одной команды/доски. */
@@ -53,4 +78,10 @@ export interface SprintReportsResult {
   sprints: SprintReportDetail[];
   /** Сколько закрытых спринтов не удалось загрузить даже после ретраев. */
   failed: number;
+  /**
+   * Только те отчёты, что реально пришли из сети в этот раз (без взятых из кеша) —
+   * вызывающий дописывает их в кеш. Отдаём даже при `failed>0`: частично добытое не должно
+   * пропадать, иначе следующее открытие снова начнёт с нуля.
+   */
+  fetched: ReadonlyMap<number, SprintReportDetail>;
 }

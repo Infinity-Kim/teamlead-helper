@@ -7,7 +7,9 @@ import {
 } from '@/core/domain';
 import type { StatusTransition } from '@/core/metrics';
 import type {
+  AgileSprintDto,
   GhBacklogIssueDto,
+  GhEstimateSum,
   GhIssueChangelogDto,
   GhSprintDto,
   GhReportIssue,
@@ -89,14 +91,27 @@ export function mapReportIssue(dto: GhReportIssue): SprintReportIssue {
   const raw =
     dto.currentEstimateStatistic?.statFieldValue?.value ??
     dto.estimateStatistic?.statFieldValue?.value;
+  // estimateStatistic = BOS (оценка на старте спринта), currentEstimateStatistic = EOS (на закрытии).
+  // Здесь БЕЗ fallback на current: подмена «нет оценки на старте» текущей оценкой превратила бы
+  // задачу, добавленную по ходу спринта, в «не переоценённую» и сломала бы правило reestimate.
+  const initial = dto.estimateStatistic?.statFieldValue?.value;
   return {
     key: dto.key,
     summary: dto.summary ?? '',
     points: typeof raw === 'number' ? raw : null,
+    initialPoints: typeof initial === 'number' ? initial : null,
     status: dto.statusName ?? '',
     type: dto.typeName ?? '',
     labels: dto.labels ?? [],
   };
+}
+
+/**
+ * SP из суммы-блока отчёта. Пустая сумма приходит как `{"text":"null"}` БЕЗ ключа `value`
+ * (замер на живом API) — поэтому только `?? 0`, никакого Number(text).
+ */
+function sumPoints(sum: GhEstimateSum | undefined): number {
+  return typeof sum?.value === 'number' ? sum.value : 0;
 }
 
 /** Отчёт спринта (contents + sprint) → доменный SprintReportDetail. */
@@ -108,10 +123,29 @@ export function mapSprintReportDetail(dto: GhSprintReportDto): SprintReportDetai
     state: dto.sprint.state,
     isoStartDate: dto.sprint.isoStartDate,
     isoCompleteDate: dto.sprint.isoCompleteDate,
-    completedPoints: c.completedIssuesEstimateSum?.value ?? 0,
-    completedInitialPoints: c.completedIssuesInitialEstimateSum?.value ?? 0,
-    notCompletedPoints: 0, // заполняется из отдельного поля, если появится; carryover по issues ниже
+    completedPoints: sumPoints(c.completedIssuesEstimateSum),
+    completedInitialPoints: sumPoints(c.completedIssuesInitialEstimateSum),
+    notCompletedPoints: sumPoints(c.issuesNotCompletedEstimateSum),
+    allPoints: sumPoints(c.allIssuesEstimateSum),
     completedIssues: (c.completedIssues ?? []).map(mapReportIssue),
     notCompletedIssues: (c.issuesNotCompletedInCurrentSprint ?? []).map(mapReportIssue),
+    puntedIssues: (c.puntedIssues ?? []).map(mapReportIssue),
+    completedInAnotherSprintIssues: (c.issuesCompletedInAnotherSprint ?? []).map(mapReportIssue),
+    // Словарь {"KEY": true}, НЕ массив — см. комментарий в dto.ts.
+    addedIssueKeys: new Set(Object.keys(c.issueKeysAddedDuringSprint ?? {})),
+    // Отсутствие поля ≠ пустой набор: первое = нет данных, второе = выбросов не было.
+    hasPuntedData: c.puntedIssues !== undefined,
+    hasAddedData: c.issueKeysAddedDuringSprint !== undefined,
+  };
+}
+
+/** Спринт Agile API → доменный Sprint. Состояния приходят СТРОЧНЫМИ (closed), в отличие от greenhopper. */
+export function mapAgileSprint(dto: AgileSprintDto): Sprint {
+  return {
+    id: dto.id,
+    name: dto.name,
+    state: normalizeSprintState(dto.state?.toUpperCase()),
+    startDate: dto.startDate,
+    endDate: dto.endDate,
   };
 }

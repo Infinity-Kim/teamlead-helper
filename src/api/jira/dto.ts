@@ -37,17 +37,45 @@ export interface GhBacklogDataDto {
 
 // --- История спринтов (для медианы velocity) ---
 
-/** Ответ /rest/greenhopper/1.0/sprintquery/<board>?includeFutureSprints=false. */
-export interface GhSprintQueryDto {
-  sprints: Array<{
-    id: number;
-    name: string;
-    state: string; // "CLOSED" | "ACTIVE"
-    sequence: number; // монотонный хронологический ключ (НЕ id!)
-  }>;
+/**
+ * Ответ ОФИЦИАЛЬНОГО /rest/agile/1.0/board/<id>/sprint?state=closed.
+ * Форма проверена на живом API (board 80, 2026-07-27).
+ *
+ * ВАЖНО: `total` помечен опциональным намеренно — Jira Cloud его часто НЕ отдаёт
+ * (JSWCLOUD-22101), поэтому пагинация строится на `isLast`, а не на `total`.
+ */
+export interface AgileSprintPageDto {
+  isLast: boolean;
+  maxResults: number;
+  startAt: number;
+  total?: number;
+  values: AgileSprintDto[];
 }
 
-/** Сумма-блок отчёта: value может ОТСУТСТВОВАТЬ (не null) при нулевой/неопр. сумме. */
+/** Спринт из Agile API. Даты — ISO 8601, приходят прямо в списке (в отличие от sprintquery). */
+export interface AgileSprintDto {
+  id: number;
+  name: string;
+  state: string; // "closed" | "active" | "future" (строчными, в отличие от greenhopper!)
+  startDate?: string; // ISO. У future-спринтов может отсутствовать.
+  endDate?: string;
+  completeDate?: string;
+  /**
+   * Доска, на которой спринт СОЗДАН. Доска отдаёт и ЧУЖИЕ спринты: в выдаче board 80
+   * реально приходят спринты Web с originBoardId=16 (замер 2026-07-27) — фильтровать
+   * обязательно, иначе в отчёт команды попадут чужие данные.
+   */
+  originBoardId?: number;
+  goal?: string;
+}
+
+/**
+ * Сумма-блок отчёта: `value` может ОТСУТСТВОВАТЬ (не null) при нулевой/неопр. сумме.
+ *
+ * ЛОВУШКА (замер 2026-07-27): при пустом наборе задач приходит `{"text": "null"}` —
+ * ключа `value` нет вообще, а `text` содержит СТРОКУ "null". Поэтому читать только через
+ * `sum?.value ?? 0`; `Number(sum.text)` даст NaN, а проверка `value === null` не сработает.
+ */
 export interface GhEstimateSum {
   value?: number;
   text?: string;
@@ -82,7 +110,10 @@ export interface GhIssueChangelogDto {
   };
 }
 
-/** Ответ /rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=&sprintId=. */
+/**
+ * Ответ /rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=&sprintId=.
+ * Полный список полей contents проверен на живом API (board 80, sprint 9465, 2026-07-27).
+ */
 export interface GhSprintReportDto {
   contents: {
     completedIssuesEstimateSum: GhEstimateSum; // completed SP на закрытии (current) — green bar Jira
@@ -90,6 +121,24 @@ export interface GhSprintReportDto {
     allIssuesEstimateSum?: GhEstimateSum; // весь объём (committed)
     completedIssues?: GhReportIssue[]; // Done-задачи — для факта по CAP-бакетам
     issuesNotCompletedInCurrentSprint?: GhReportIssue[]; // взятые, но не Done — для плана
+    /** Carryover в SP одним числом — Jira считает сам (раньше суммировали по задачам вручную). */
+    issuesNotCompletedEstimateSum?: GhEstimateSum;
+    issuesNotCompletedInitialEstimateSum?: GhEstimateSum;
+    /** Задачи, ВЫБРОШЕННЫЕ из спринта после старта (блок "Issues Removed From Sprint"). */
+    puntedIssues?: GhReportIssue[];
+    puntedIssuesEstimateSum?: GhEstimateSum;
+    puntedIssuesInitialEstimateSum?: GhEstimateSum;
+    /** Взяты в этот спринт, но закрыты в другом. Jira не считает их ни в completed, ни в notCompleted. */
+    issuesCompletedInAnotherSprint?: GhReportIssue[];
+    issuesCompletedInAnotherSprintEstimateSum?: GhEstimateSum;
+    /**
+     * Ключи задач, добавленных в спринт ПОСЛЕ старта (звёздочка в родном Sprint Report).
+     *
+     * ЭТО СЛОВАРЬ, НЕ МАССИВ: реальное значение `{"ELCAS-12646": true}` (замер 2026-07-27).
+     * Часть библиотек в интернете типизирует его как string[] — это их баг.
+     * Разбирать только через Object.keys(... ?? {}).
+     */
+    issueKeysAddedDuringSprint?: Record<string, boolean>;
   };
   sprint: {
     id: number;
