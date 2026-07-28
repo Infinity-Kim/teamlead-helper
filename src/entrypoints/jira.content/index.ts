@@ -34,6 +34,7 @@ import {
   quarterUiMode,
   statusConfig,
 } from '@/shared/storage';
+import { TARGET } from '@/shared/messaging';
 import { BUCKET_TO_CAP_LABEL, ALL_CAP_LABELS, bucketForLabel } from '@/core/domain';
 import type {
   BoardBacklog,
@@ -104,14 +105,23 @@ export default defineContentScript({
      * Страница отчёта живёт на chrome-extension:// и сама так не может.
      */
     browser.runtime.onMessage.addListener(
-      (msg: { type?: string; path?: string }, _sender, sendResponse) => {
-        if (msg?.type !== 'jiraFetch' || typeof msg.path !== 'string') return false;
+      (msg: { __target?: string; type?: string; path?: string }, _sender, sendResponse) => {
+        // Отвечаем ТОЛЬКО на адресованное этой вкладке: «only the first listener to respond
+        // will affect the sender» — иначе перехватим ответ, предназначенный background.
+        if (msg?.__target !== TARGET.jiraTab) return false;
+
+        if (msg.type === 'jiraPing') {
+          sendResponse({ ready: true });
+          return false;
+        }
+        if (msg.type !== 'jiraFetch' || typeof msg.path !== 'string') return false;
+
         fetch(msg.path, { credentials: 'include', headers: { Accept: 'application/json' } })
           .then(async (r) => {
             sendResponse({ ok: r.ok, status: r.status, body: await r.text() });
           })
           .catch((e) => sendResponse({ ok: false, status: 0, error: String(e) }));
-        return true; // ответ асинхронный — держим канал открытым
+        return true; // ответ асинхронный — держим канал открытым (return true в синхронном теле)
       },
     );
 

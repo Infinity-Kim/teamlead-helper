@@ -70,6 +70,23 @@ const thresholds = ref<HealthThresholds | null>(null);
 /** Данные идут через вкладку Jira (без токена) — показываем это пользователю. */
 const usingTab = ref(false);
 
+/** Ждём, пока вкладка Jira догрузится — объясняем пользователю паузу. */
+const waitingTab = ref(false);
+
+/**
+ * Дождаться готовности вкладки Jira, опрашивая background короткими запросами.
+ * Ожидание держим НА СТРАНИЦЕ: MV3-воркер выгружается после ~30 с бездействия и порвал бы
+ * длинную паузу. Jira SPA поднимается до ~20 с — отсюда запас.
+ */
+async function waitJiraTabReady(timeoutMs = 30_000): Promise<{ ready: boolean; present: boolean }> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await sendMessage('jiraTabReady');
+    if (res.ready || Date.now() >= deadline) return res;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
 /** Собрать TeamReport из сырья спринтов. */
 function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number): TeamReport {
   const meta = TEAM_BOARDS.find((b) => b.rapidViewId === rvid);
@@ -227,11 +244,17 @@ async function load(force = false) {
       setJiraTabTransport(null);
       usingTab.value = false;
     } else {
-      const { present } = await sendMessage('jiraTabPresent');
-      if (!present) {
-        error.value =
-          'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
-          'либо укажите email и API-токен в настройках расширения.';
+      // Ждём ГОТОВНОСТИ вкладки, а не просто её наличия: Jira SPA поднимает content-script
+      // секунды, и без ожидания первый же запрос падал бы — пользователь видел бы ошибку
+      // вместо данных. Цикл живёт здесь: страница не выгружается, в отличие от MV3-воркера.
+      waitingTab.value = true;
+      const { ready, present } = await waitJiraTabReady();
+      waitingTab.value = false;
+      if (!ready) {
+        error.value = present
+          ? 'Вкладка Jira ещё не загрузилась. Дождитесь, пока откроется доска, и нажмите «Повторить».'
+          : 'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
+            'либо укажите email и API-токен в настройках расширения.';
         return;
       }
       setJiraAuth(null);
@@ -248,13 +271,31 @@ async function load(force = false) {
     await writeSprintCache(fetched);
     applyReport(built);
   } catch (e) {
-    error.value =
-      e instanceof JiraRequestError && e.error.kind === 'unauthorized'
-        ? 'Jira отклонил запрос (401/403). Проверьте email и API-токен в настройках.'
-        : `Ошибка загрузки: ${String(e)}`;
+    error.value = errorText(e);
   } finally {
     loading.value = false;
   }
+}
+
+/**
+ * Текст ошибки под режим доступа: в режиме вкладки совет «проверьте токен» бессмыслен —
+ * токена там нет и не должно быть.
+ */
+function errorText(e: unknown): string {
+  if (e instanceof JiraRequestError) {
+    if (e.error.kind === 'unauthorized') {
+      return usingTab.value
+        ? 'Jira отклонила запрос (401/403). Похоже, сессия на вкладке Jira истекла — обновите вкладку и войдите заново.'
+        : 'Jira отклонила запрос (401/403). Проверьте email и API-токен в настройках.';
+    }
+    if (e.error.kind === 'not-configured') {
+      return 'Вкладка Jira не отвечает. Откройте её, дождитесь загрузки доски и нажмите «Повторить». Либо укажите API-токен в настройках — тогда вкладка не нужна.';
+    }
+    if (e.error.kind === 'rate-limited') {
+      return 'Jira ограничила частоту запросов. Подождите минуту и нажмите «Повторить» — уже загруженные спринты сохранены.';
+    }
+  }
+  return `Ошибка загрузки: ${String(e)}`;
 }
 
 /** Кнопка «Обновить» — форсированная перезагрузка текущей команды из сети. */
@@ -621,14 +662,27 @@ const CAP_SLICES_ALL = CAP_SLICES;
       <!-- Ошибка -->
       <div
         v-if="error"
-        class="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
+        class="flex flex-wrap items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
       >
-        {{ error }}
+        <span class="flex-1">{{ error }}</span>
+        <button
+          type="button"
+          class="shrink-0 rounded-md border border-amber-400 px-2.5 py-1 text-xs font-medium hover:bg-amber-100 disabled:opacity-50 dark:border-amber-700 dark:hover:bg-amber-900"
+          :disabled="loading"
+          @click="refresh"
+        >
+          Повторить
+        </button>
       </div>
 
       <!-- Загрузка -->
       <div v-else-if="loading" class="py-16 text-center text-sm text-slate-400">
-        Загружаем отчёты по спринтам… (все закрытые спринты команды с 2025 года)
+        <template v-if="waitingTab">
+          Ждём загрузки вкладки Jira — через неё идут запросы, пока не задан API-токен…
+        </template>
+        <template v-else>
+          Загружаем отчёты по спринтам… (все закрытые спринты команды с 2025 года)
+        </template>
       </div>
 
       <!-- Пусто -->

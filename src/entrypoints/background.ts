@@ -1,5 +1,5 @@
 import { browser } from 'wxt/browser';
-import { onMessage, type JiraProxyResult } from '@/shared/messaging';
+import { onMessage, TARGET, type JiraProxyResult } from '@/shared/messaging';
 
 /** Вкладки Jira, через которые можно ходить в API с cookie сессии. */
 const JIRA_TAB_MATCH = '*://*.atlassian.net/*';
@@ -16,6 +16,9 @@ async function findJiraTab(): Promise<number | null> {
 /**
  * GET к Jira руками пользователя: запрос исполняет content-script на вкладке Jira,
  * поэтому уходят cookie сессии SSO и токен не нужен.
+ *
+ * `__target` обязателен: сообщение получают все слушатели вкладки, и без адресата чужой
+ * слушатель может ответить первым, перебив ответ нашего content-script.
  */
 async function jiraFetchViaTab(path: string): Promise<JiraProxyResult> {
   const tabId = await findJiraTab();
@@ -23,35 +26,59 @@ async function jiraFetchViaTab(path: string): Promise<JiraProxyResult> {
     return { ok: false, status: 0, error: 'no-jira-tab' };
   }
   try {
-    return (await browser.tabs.sendMessage(tabId, {
+    const res = (await browser.tabs.sendMessage(tabId, {
+      __target: TARGET.jiraTab,
       type: 'jiraFetch',
       path,
-    })) as JiraProxyResult;
+    })) as JiraProxyResult | undefined;
+    // undefined = content-script ещё не поднялся на этой вкладке (Jira SPA грузится секунды).
+    return res ?? { ok: false, status: 0, error: 'tab-not-ready' };
   } catch (e) {
-    // Content-script мог не успеть подняться (вкладка только открыта) или быть выгружен.
+    // Вкладка только открыта / выгружена из памяти — её скрипт не отвечает.
     return { ok: false, status: 0, error: `tab-unreachable: ${String(e)}` };
   }
 }
 
-export default defineBackground(() => {
-  // По клику на иконку расширения открываем side panel (а не popup).
-  // setPanelBehavior доступен только в Chromium; в других браузерах — мягко игнорируем.
-  browser.runtime.onInstalled.addListener(() => {
-    void browser.sidePanel
-      ?.setPanelBehavior({ openPanelOnActionClick: true })
-      .catch((error) => console.warn('[TLH] sidePanel.setPanelBehavior:', error));
-  });
+/**
+ * Готова ли вкладка Jira принимать запросы. Проверяем не «есть ли вкладка» (она появляется
+ * мгновенно), а отвечает ли её content-script — иначе первый же запрос упадёт.
+ *
+ * Состояние НЕ кэшируем: MV3-воркер выгружается и теряет память («global variables are not
+ * preserved between terminations»), поэтому опрашиваем вкладку по факту.
+ */
+async function probeJiraTab(): Promise<{ ready: boolean; present: boolean }> {
+  const tabId = await findJiraTab();
+  if (tabId === null) return { ready: false, present: false };
+  const ready = await browser.tabs
+    .sendMessage(tabId, { __target: TARGET.jiraTab, type: 'jiraPing' })
+    .then((r) => (r as { ready?: boolean } | undefined)?.ready === true)
+    .catch(() => false);
+  return { ready, present: true };
+}
 
-  // Мост сообщений. Сам background в Jira не ходит: у него нет cookie сессии, а токен —
-  // не единственный способ авторизации. Запросы исполняет content-script на вкладке Jira.
-  onMessage(async (message) => {
-    switch (message.type) {
-      case 'ping':
-        return { ok: true, ts: Date.now() };
-      case 'jiraFetch':
-        return jiraFetchViaTab(message.path);
-      case 'jiraTabPresent':
-        return { present: (await findJiraTab()) !== null };
-    }
-  });
+// Слушатели регистрируются СИНХРОННО на верхнем уровне: MV3-воркер просыпается по событию,
+// и обработчик, зарегистрированный позже (внутри async-инициализации), это событие пропустит.
+browser.runtime.onInstalled.addListener(() => {
+  // По клику на иконку открываем side panel (а не popup). Только Chromium — иначе игнорируем.
+  void browser.sidePanel
+    ?.setPanelBehavior({ openPanelOnActionClick: true })
+    .catch((error) => console.warn('[TLH] sidePanel.setPanelBehavior:', error));
+});
+
+// Мост сообщений. Сам background в Jira не ходит: у него нет cookie сессии. Запросы исполняет
+// content-script на вкладке Jira, где живёт SSO-сессия пользователя.
+onMessage((message) => {
+  switch (message.type) {
+    case 'ping':
+      return { ok: true as const, ts: Date.now() };
+    case 'jiraFetch':
+      return jiraFetchViaTab(message.path);
+    case 'jiraTabReady':
+      return probeJiraTab();
+  }
+});
+
+export default defineBackground(() => {
+  // Точка входа WXT. Регистрация слушателей уже выполнена на верхнем уровне модуля —
+  // здесь ничего делать не нужно, и это осознанно (см. комментарий выше).
 });
