@@ -1,5 +1,13 @@
 import { storage } from 'wxt/utils/storage';
-import { DEFAULT_CAP_TARGETS, type CapTargets, type SprintReportDetail } from '@/core/domain';
+import {
+  DEFAULT_CAP_TARGETS,
+  DEFAULT_DIVISIONS,
+  DEFAULT_TEAMS,
+  type CapTargets,
+  type Division,
+  type SprintReportDetail,
+  type TeamBoard,
+} from '@/core/domain';
 
 /**
  * Типобезопасный слой хранилища расширения — ЕДИНЫЙ источник истины для persisted-state.
@@ -45,17 +53,25 @@ export const jiraCreds = storage.defineItem<JiraCreds | null>('local:jiraCreds',
   fallback: null,
 });
 
-/** Доски команд для sprint-отчёта (El Casino / POC / Web). Порядок = порядок в UI. */
-export const TEAM_BOARDS: ReadonlyArray<{ team: string; rapidViewId: number }> = [
-  { team: 'El Casino', rapidViewId: 80 },
-  { team: 'POC', rapidViewId: 1178 },
-  { team: 'Web', rapidViewId: 16 },
-];
+/**
+ * Команды (доски) для отчёта по спринтам. Порядок = порядок вкладок в отчёте.
+ * Дефолт — El Casino / POC / Web; пользователь может выключить их и добавить свои по ссылке
+ * на доску. sync — это общая настройка, а не данные.
+ */
+export const teams = storage.defineItem<TeamBoard[]>('sync:teams', {
+  fallback: DEFAULT_TEAMS.map((t) => ({ ...t })),
+});
+
+/** Дивизионы — группы команд для общей квартальной сводки. По умолчанию только Games. */
+export const divisions = storage.defineItem<Division[]>('sync:divisions', {
+  fallback: DEFAULT_DIVISIONS.map((d) => ({ ...d, teamIds: [...d.teamIds] })),
+});
 
 /**
  * Кэш детальных sprint-отчётов, ПО СПРИНТАМ (не по доскам) и БЕЗ TTL.
  *
- * Закрытый спринт неизменен — его отчёт можно держать вечно, поэтому кэшируем поштучно:
+ * Состав закрытого спринта неизменен — его отчёт можно держать вечно, поэтому кэшируем поштучно.
+ * Метки и оценки задач правят и после закрытия — их подтягивает кнопка «Обновить» в отчёте:
  * при открытии страницы догружаются только новые спринты (1–2 раз в две недели) вместо
  * всех 83 закрытых спринтов доски. Частично добытые данные тоже сохраняются — упавший
  * из-за rate-limit спринт дотянется в следующий раз, а не потеряется.

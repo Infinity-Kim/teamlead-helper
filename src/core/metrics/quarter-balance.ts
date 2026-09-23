@@ -26,11 +26,55 @@ export function quarterOf(isoDate: string): QuarterId | null {
   return `${d.getUTCFullYear()}-Q${q}`;
 }
 
-/** Сгруппировать спринты по кварталу (по дате старта). */
+/** Следующий квартал: "2026-Q4" → "2027-Q1". */
+export function nextQuarter(q: QuarterId): QuarterId {
+  const [y, n] = q.split('-Q').map(Number);
+  return n === 4 ? `${y + 1}-Q1` : `${y}-Q${n + 1}`;
+}
+
+/**
+ * Отнести спринты ОДНОЙ команды к кварталам: по дате старта, но не больше SPRINTS_PER_QUARTER
+ * спринтов в квартале — седьмой и дальше уходят в следующий квартал.
+ *
+ * Почему не чистый календарь: квартал команды = 6 двухнедельных спринтов, а 13 недель
+ * календарного квартала вмещают 6.5. Спринт, стартующий в последнюю неделю квартала,
+ * по календарю стал бы седьмым спринтом уходящего квартала, хотя это первый спринт нового
+ * (живые данные: ELCAS-26.9.1 закрыт 23.09 — шестой в Q3, спринт со старта 23.09 — первый в Q4).
+ * На всей истории с Q4 2025 правило даёт те же кварталы, что календарь: переносов не было.
+ *
+ * Спринт без валидной даты старта в результат не попадает.
+ */
+export function assignQuarters<T>(
+  items: readonly T[],
+  startOf: (t: T) => string | undefined,
+): Map<T, QuarterId> {
+  const dated = items
+    .map((item) => ({ item, t: Date.parse(startOf(item) ?? '') }))
+    .filter((x) => !Number.isNaN(x.t))
+    .sort((a, b) => a.t - b.t);
+
+  const out = new Map<T, QuarterId>();
+  const count = new Map<QuarterId, number>();
+  let prev: QuarterId | null = null;
+  for (const { item, t } of dated) {
+    let q = quarterOf(new Date(t).toISOString())!;
+    // Квартал не может идти раньше квартала предыдущего спринта: если туда уже переносили,
+    // следующий спринт продолжает тот же квартал, а не возвращается в календарный.
+    if (prev && q < prev) q = prev;
+    while ((count.get(q) ?? 0) >= SPRINTS_PER_QUARTER) q = nextQuarter(q);
+    count.set(q, (count.get(q) ?? 0) + 1);
+    out.set(item, q);
+    prev = q;
+  }
+  return out;
+}
+
+/** Сгруппировать спринты одной доски по кварталу (см. assignQuarters). */
 export function groupByQuarter(sprints: SprintRecord[]): Map<QuarterId, SprintRecord[]> {
   const map = new Map<QuarterId, SprintRecord[]>();
+  const quarterBy = assignQuarters(sprints, (x) => x.startDate);
   for (const s of sprints) {
-    const q = quarterOf(s.startDate);
+    const q = quarterBy.get(s);
     if (!q) continue;
     (map.get(q) ?? map.set(q, []).get(q)!).push(s);
   }

@@ -1,10 +1,9 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
-import type { QuarterBalance, QuarterTrends } from '@/core/domain';
+import type { QuarterBalance } from '@/core/domain';
 import { SPRINTS_PER_QUARTER } from '@/core/domain';
 import { sprintsRemaining } from '@/core/metrics';
 import { ADS } from './ads-tokens';
-import TrendCell from './TrendCell.vue';
 import InfoTip from './InfoTip.vue';
 
 const props = defineProps<{
@@ -13,49 +12,7 @@ const props = defineProps<{
   targetPct: number;
   /** Полуширина коридора (пп). */
   bandPp: number;
-  /** Квартальные тренды (throughput/say-do/carryover). null — нет истории (не рисуем блок). */
-  trends?: QuarterTrends | null;
 }>();
-
-// --- Данные для тренд-ячеек (готовим числа/подписи; окраску/пороги НЕ навязываем) ---
-const throughputCell = computed(() => {
-  const t = props.trends?.throughput;
-  if (!t || t.median === null) return null;
-  const cv = t.coefficientOfVariation;
-  return {
-    value: String(t.median),
-    spark: t.perSprint.map((p) => p.count),
-    direction: null as null, // throughput сам по себе не «хорош/плох» — показываем стабильность
-    hint: cv === null ? 'предсказуемость: —' : `разброс ±${Math.round(cv * 100)}% (CV ${cv})`,
-  };
-});
-const reliabilityCell = computed(() => {
-  const t = props.trends?.reliability;
-  if (!t || t.medianRatio === null) return null;
-  const spark = t.perSprint.map((p) => p.ratio).filter((r): r is number => r !== null);
-  return {
-    value: t.medianRatio.toFixed(2),
-    spark,
-    baseline: t.medianRatio,
-    direction: t.direction,
-    hint: 'медиана say/do · тренд, не цель',
-  };
-});
-const carryoverCell = computed(() => {
-  const t = props.trends?.carryover;
-  if (!t || t.median === null) return null;
-  // Показываем и задачи (консистентно с throughput), и SP (связь с capacity-балансом).
-  const countPart = t.medianCount !== null ? `${t.medianCount} задач / ` : '';
-  return {
-    value: `${countPart}${t.median} SP`,
-    spark: t.perSprint.map((p) => p.points),
-    direction: t.direction,
-    hint: 'переносится в среднем',
-  };
-});
-const hasTrends = computed(
-  () => !!(throughputCell.value || reliabilityCell.value || carryoverCell.value),
-);
 
 // ADS-токены (общие для виджетов, см. ads-tokens.ts).
 const T = ADS;
@@ -214,64 +171,5 @@ const remaining = computed(() => sprintsRemaining(props.balance.sprintsCounted))
       <template v-else> Баланс в пределах цели ({{ targetPct }}% ±{{ bandPp }}%). </template>
     </div>
 
-    <!-- Квартальные тренды: throughput / say-do / carryover (self-referential, без порогов) -->
-    <div
-      v-if="hasTrends"
-      :style="{
-        display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))',
-        gap: '10px 16px',
-        marginTop: '10px',
-        paddingTop: '10px',
-        borderTop: `1px solid var(--ds-border, rgba(9,30,66,0.10))`,
-      }"
-    >
-      <TrendCell
-        v-if="throughputCell"
-        label="Скорость (задач/спринт)"
-        :value="throughputCell.value"
-        unit="задач"
-        :spark="throughputCell.spark"
-        :direction="throughputCell.direction"
-        :hint="throughputCell.hint"
-        :tip="{
-          what: 'Сколько задач команда закрывает за спринт (throughput). В штуках, не в SP — устойчиво к инфляции оценок.',
-          how: 'Медиана числа завершённых задач за последние спринты. CV = разброс (σ/среднее): чем меньше, тем стабильнее.',
-          read: 'Число = типичная скорость. Низкий CV (< 0.2) = предсказуемая команда; высокий = скачет от спринта к спринту.',
-          plan: 'База для прогноза ёмкости. Стабильная скорость → плану можно верить; скачущая → закладывайте запас.',
-        }"
-      />
-      <TrendCell
-        v-if="reliabilityCell"
-        label="Надёжность плана (say/do)"
-        :value="reliabilityCell.value"
-        :spark="reliabilityCell.spark"
-        :baseline="reliabilityCell.baseline"
-        :direction="reliabilityCell.direction"
-        good-when="up"
-        :hint="reliabilityCell.hint"
-        :tip="{
-          what: 'Насколько команда выполняет то, что берёт в спринт.',
-          how: 'Медиана (выполнено SP ÷ взято SP) за спринты. Взятое замораживается на планировании.',
-          read: '1.0 = закрывают ровно взятое; 0.79 = в среднем 79% взятого. Важен тренд, не абсолют.',
-          plan: 'Если стабильно < 1 — систематически переоцениваете; берите меньше. НЕ цель и не оценка людей.',
-        }"
-      />
-      <TrendCell
-        v-if="carryoverCell"
-        label="Перенос (carryover)"
-        :value="carryoverCell.value"
-        :spark="carryoverCell.spark"
-        :direction="carryoverCell.direction"
-        good-when="down"
-        :hint="carryoverCell.hint"
-        :tip="{
-          what: 'Сколько работы в среднем не успевают закрыть и переносят в следующий спринт.',
-          how: 'Медиана незавершённого за спринт — в задачах и в SP (взято, но не Done к концу спринта).',
-          read: 'Растущий тренд ↑ = берёте больше, чем закрываете, хвост копится. Падающий ↓ = разгружаетесь.',
-          plan: 'Высокий перенос = план стабильно не влезает. Уменьшайте объём спринта на величину типичного переноса.',
-        }"
-      />
-    </div>
   </div>
 </template>

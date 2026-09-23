@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   quarterOf,
   groupByQuarter,
+  assignQuarters,
+  nextQuarter,
   calcQuarterBalance,
   requiredProductPctForRemainder,
   sprintsRemaining,
@@ -138,5 +140,42 @@ describe('sprintsRemaining', () => {
     expect(sprintsRemaining(2)).toBe(4);
     expect(sprintsRemaining(6)).toBe(0);
     expect(sprintsRemaining(7)).toBe(0);
+  });
+});
+
+describe('assignQuarters — не больше 6 спринтов в квартале', () => {
+  // Реальные даты старта ELCAS в Q3 2026 + новый спринт со старта 23.09.
+  const q3 = ['2026-07-02', '2026-07-15', '2026-07-29', '2026-08-12', '2026-08-26', '2026-09-09'];
+
+  it('седьмой спринт календарного квартала уходит в следующий', () => {
+    const starts = [...q3, '2026-09-23'];
+    const m = assignQuarters(starts, (s) => s);
+    expect(q3.map((s) => m.get(s))).toEqual(Array(6).fill('2026-Q3'));
+    expect(m.get('2026-09-23')).toBe('2026-Q4');
+  });
+
+  it('после переноса следующий спринт не возвращается в прошлый квартал', () => {
+    const m = assignQuarters([...q3, '2026-09-23', '2026-09-30'], (s) => s);
+    expect(m.get('2026-09-30')).toBe('2026-Q4');
+  });
+
+  it('порядок входа не важен — сортируем по старту', () => {
+    const m = assignQuarters(['2026-09-23', ...[...q3].reverse()], (s) => s);
+    expect(m.get('2026-09-23')).toBe('2026-Q4');
+    expect(m.get('2026-07-02')).toBe('2026-Q3');
+  });
+
+  it('обычный квартал с 6 спринтами — как календарь; без даты — пропуск', () => {
+    const m = assignQuarters(['2026-03-25', '2026-04-08', 'nonsense'], (s) => s);
+    expect([m.get('2026-03-25'), m.get('2026-04-08'), m.has('nonsense')]).toEqual([
+      '2026-Q1',
+      '2026-Q2',
+      false,
+    ]);
+  });
+
+  it('перенос через год: Q4 → Q1 следующего года', () => {
+    expect(nextQuarter('2026-Q4')).toBe('2027-Q1');
+    expect(nextQuarter('2026-Q2')).toBe('2026-Q3');
   });
 });

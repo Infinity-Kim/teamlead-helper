@@ -1,6 +1,5 @@
 import type {
   BoardBacklog,
-  SprintOutcome,
   SprintRecord,
   SprintReportDetail,
   SprintReportsResult,
@@ -19,12 +18,7 @@ import type {
   GhIssueChangelogDto,
   GhSprintReportDto,
 } from './dto';
-import {
-  currentConcurrency,
-  jiraGetJson,
-  jiraGetJsonRetry,
-  mapWithConcurrency,
-} from './client';
+import { currentConcurrency, jiraGetJson, jiraGetJsonRetry, mapWithConcurrency } from './client';
 import { endpoints } from './endpoints';
 import {
   mapIssue,
@@ -53,7 +47,9 @@ export async function fetchClosedSprints(rapidViewId: number): Promise<AgileSpri
       endpoints.boardSprints(rapidViewId, startAt),
     );
     const values = page.values ?? [];
-    out.push(...values.filter((s) => s.originBoardId === undefined || s.originBoardId === rapidViewId));
+    out.push(
+      ...values.filter((s) => s.originBoardId === undefined || s.originBoardId === rapidViewId),
+    );
     if (page.isLast || values.length === 0) break;
     startAt += values.length;
   }
@@ -160,41 +156,6 @@ export async function getQuarterSprints(
       };
     })
     .filter((r) => r.startDate !== '');
-}
-
-/**
- * Итоги последних `lastN` ЗАКРЫТЫХ спринтов — для reliability (say/do), throughput и forecast.
- * Хронологический порядок: СВЕЖИЕ В КОНЦЕ (тренды/спарклайны читаются слева направо по времени).
- *
- * committed = allIssuesEstimateSum (baseline на планировании — заморожен; поздние добавления
- * в него не входят, это семантика Jira Velocity Chart). completed = completedIssuesEstimateSum.
- * completedCount = число Done-задач (throughput — счёт, не SP; устойчив к инфляции оценок).
- */
-export async function getSprintOutcomes(
-  rapidViewId: number,
-  lastN: number,
-): Promise<SprintOutcome[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
-  return ok
-    .map(({ sprint, report }): SprintOutcome => {
-      const c = report.contents;
-      // carryover = взятые, но не завершённые задачи (переносятся дальше): в SP И в задачах.
-      const notDone = c?.issuesNotCompletedInCurrentSprint ?? [];
-      const carryoverPoints = notDone.reduce(
-        (sum, i) => sum + (i.currentEstimateStatistic?.statFieldValue?.value ?? 0),
-        0,
-      );
-      return {
-        id: sprint.id,
-        name: sprint.name,
-        committedPoints: c?.allIssuesEstimateSum?.value ?? 0,
-        completedPoints: c?.completedIssuesEstimateSum?.value ?? 0,
-        completedCount: c?.completedIssues?.length ?? 0,
-        carryoverPoints: +carryoverPoints.toFixed(1),
-        carryoverCount: notDone.length,
-      };
-    })
-    .reverse(); // fetchRecentSprintReports отдаёт от свежих к старым — разворачиваем в хронологию
 }
 
 /** Переходы статусов одной задачи через changelog (или [] при ошибке — не роняем весь расчёт). */
@@ -326,6 +287,7 @@ export async function getBoardSprintReportsSince(
   rapidViewId: number,
   sinceIso: string,
   cached: ReadonlyMap<number, SprintReportDetail> = new Map(),
+  refetch = false,
 ): Promise<SprintReportsResult> {
   const since = Date.parse(sinceIso);
 
@@ -335,8 +297,10 @@ export async function getBoardSprintReportsSince(
     return !Number.isNaN(t) && t >= since;
   });
 
-  // 2) Отчёты закрытых спринтов неизменны → тянем только те, которых нет в кеше.
-  const missing = wanted.filter((s) => !cached.has(s.id));
+  // 2) Обычно тянем только спринты, которых нет в кеше. refetch — все: метки и оценки задач
+  //    правят и после закрытия спринта, а отчёт отдаёт их текущие значения. Кеш при этом
+  //    остаётся запасным вариантом — спринт, не догрузившийся из-за лимита, не пропадёт.
+  const missing = refetch ? wanted : wanted.filter((s) => !cached.has(s.id));
 
   const settled = await mapWithConcurrency(missing, currentConcurrency(), (sprint) =>
     jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),

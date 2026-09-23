@@ -9,7 +9,7 @@ import {
 } from '@/core/domain';
 import { splitPointsByBucket, type BucketPoints } from './cap-distribution';
 import { median } from './median';
-import { quarterOf } from './quarter-balance';
+import { assignQuarters } from './quarter-balance';
 
 /**
  * Агрегаты для страницы «Отчёт по спринтам» — ЧИСТЫЕ функции (тестируются без браузера).
@@ -19,7 +19,7 @@ import { quarterOf } from './quarter-balance';
  *  - CAP-раскладка спринта считается по completedIssues[] (labels + SP на закрытии);
  *  - несколько CAP-лейблов на задаче → SP делятся поровну (splitPointsByBucket);
  *  - проценты — от ВСЕГО completed, ВКЛЮЧАЯ Unlabeled (4 слайса = 100%);
- *  - спринт относится к кварталу ПО ДАТЕ СТАРТА (quarterOf по isoStartDate), целиком;
+ *  - спринт относится к кварталу по дате старта, целиком, не больше 6 спринтов (assignQuarters);
  *  - average velocity = медиана И среднее последних N (по умолчанию 6) completedPoints.
  */
 
@@ -49,9 +49,7 @@ function issuePoints(points: number | null): number {
 
 /** CAP-бакеты задачи (по её CAP-меткам). Пусто = у задачи нет CAP-метки. */
 export function issueBuckets(issue: SprintReportIssue): CapBucket[] {
-  return issue.labels
-    .map(bucketForLabel)
-    .filter((b): b is CapBucket => b !== null);
+  return issue.labels.map(bucketForLabel).filter((b): b is CapBucket => b !== null);
 }
 
 /**
@@ -79,7 +77,10 @@ function toBreakdown(points: BucketPoints): CapBreakdown {
 /** CAP-раскладка ОДНОГО спринта по его completedIssues (labels → buckets → доли). */
 export function sprintCapBreakdown(detail: SprintReportDetail): CapBreakdown {
   const points = splitPointsByBucket(
-    detail.completedIssues.map((i) => ({ buckets: issueBuckets(i), points: issuePoints(i.points) })),
+    detail.completedIssues.map((i) => ({
+      buckets: issueBuckets(i),
+      points: issuePoints(i.points),
+    })),
   );
   return toBreakdown(points);
 }
@@ -104,14 +105,15 @@ export interface QuarterGroup {
 }
 
 /**
- * Сгруппировать спринты по кварталу (по дате СТАРТА, isoStartDate). Спринт без валидной
+ * Сгруппировать спринты одной команды по кварталу (assignQuarters). Спринт без валидной
  * даты старта пропускается. Кварталы возвращаются в хронологии от НОВЫХ к старым
  * (свежий квартал сверху). Внутри квартала спринты — как пришли (ожидается «свежие→старые»).
  */
 export function groupSprintsByQuarter(details: SprintReportDetail[]): QuarterGroup[] {
   const map = new Map<QuarterId, SprintReportDetail[]>();
+  const quarterBy = assignQuarters(details, (d) => d.isoStartDate);
   for (const d of details) {
-    const q = d.isoStartDate ? quarterOf(d.isoStartDate) : null;
+    const q = quarterBy.get(d);
     if (!q) continue;
     const list = map.get(q);
     if (list) list.push(d);

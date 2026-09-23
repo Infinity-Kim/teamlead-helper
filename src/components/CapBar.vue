@@ -1,9 +1,7 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
-import type { SprintCapStats, CapSlice, ThroughputForecast, ReliabilityTrend } from '@/core/domain';
+import type { SprintCapStats, CapSlice } from '@/core/domain';
 import { ADS, BUCKET_COLORS } from './ads-tokens';
-import ForecastBar from './ForecastBar.vue';
-import Sparkline from './Sparkline.vue';
 import InfoTip from './InfoTip.vue';
 
 const props = defineProps<{
@@ -16,20 +14,7 @@ const props = defineProps<{
   medianSp: number | null;
   /** Идёт пересчёт (после смены лейбла) — показываем индикатор. */
   refreshing: boolean;
-  /** Прогноз Monte Carlo «сколько задач влезет» — ТОЛЬКО для активного спринта. null — не рисуем. */
-  forecast?: ThroughputForecast | null;
-  /** Say/do тренд команды (для активного спринта) — спарклайн надёжности плана. null — не рисуем. */
-  reliability?: ReliabilityTrend | null;
 }>();
-
-// Say/do: значения тренда + текущая медиана (для активного спринта). null — нет истории.
-const reliabilitySpark = computed(() => {
-  const r = props.reliability;
-  if (!r) return null;
-  const spark = r.perSprint.map((p) => p.ratio).filter((x): x is number => x !== null);
-  if (spark.length < 2 || r.medianRatio === null) return null;
-  return { spark, median: r.medianRatio };
-});
 
 const emit = defineEmits<{
   bucketClick: [bucket: CapSlice];
@@ -272,65 +257,5 @@ function dot(bucket: CapSlice) {
       </span>
     </div>
 
-    <!-- Планировочные метрики активного спринта: прогноз Monte Carlo + say/do тренд -->
-    <div
-      v-if="forecast || reliabilitySpark"
-      :style="{
-        display: 'flex',
-        gap: '18px',
-        flexWrap: 'wrap',
-        marginTop: '8px',
-        paddingTop: '8px',
-        borderTop: `1px solid var(--ds-border, rgba(9,30,66,0.10))`,
-      }"
-    >
-      <div v-if="forecast" :style="{ paddingLeft: '10px', borderLeft: `2px solid ${T.information}` }">
-        <ForecastBar :forecast="forecast" />
-      </div>
-
-      <div
-        v-if="reliabilitySpark"
-        :style="{ paddingLeft: '10px', borderLeft: `2px solid ${T.information}`, minWidth: '0' }"
-      >
-        <div
-          :style="{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '4px',
-            fontSize: '10px',
-            fontWeight: 700,
-            letterSpacing: '0.05em',
-            textTransform: 'uppercase',
-            color: T.subtlest,
-            marginBottom: '2px',
-          }"
-        >
-          Надёжность плана
-          <InfoTip
-            title="Надёжность плана (say/do)"
-            what="Насколько команда выполняет то, что берёт в спринт."
-            how="Выполнено SP ÷ взято SP на планировании (baseline заморожен). Показана медиана за последние спринты."
-            read="1.0 = закрывают ровно взятое. 0.79 = в среднем закрывают 79% взятого. Смотрите на тренд, не на абсолют."
-            plan="Если стабильно < 1 — берите меньше (умножьте желаемое на этот коэффициент). Это НЕ цель и не оценка людей — только сигнал реализма плана."
-          />
-        </div>
-        <div
-          :style="{
-            fontSize: '13px',
-            fontWeight: 600,
-            fontVariantNumeric: 'tabular-nums',
-          }"
-        >
-          {{ reliabilitySpark.median.toFixed(2) }}
-        </div>
-        <Sparkline
-          :values="reliabilitySpark.spark"
-          :baseline="reliabilitySpark.median"
-          :width="120"
-          :height="22"
-        />
-        <div :style="{ fontSize: '11px', color: T.subtle }">медиана за спринты · тренд</div>
-      </div>
-    </div>
   </div>
 </template>
