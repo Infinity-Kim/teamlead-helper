@@ -38,7 +38,7 @@
     "@vue/eslint-config-typescript": "^14.6.0",
     "@wxt-dev/auto-icons": "^1.0.2",
     "@wxt-dev/module-vue": "^1.0.3",
-    "eslint": "^9.30.0",
+    "eslint": "^10.6.0",
     "eslint-plugin-vue": "^10.2.0",
     "playwright": "^1.61.1",
     "prettier": "^3.6.2",
