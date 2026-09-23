@@ -57,3 +57,14 @@ describe('divisionQuarters', () => {
     expect(divisionQuarters([])).toEqual([]);
   });
 });
+
+describe('divisionQuarters — закрытие', () => {
+  it('процент закрытия дивизиона — от сумм по всем командам', () => {
+    const [q] = divisionQuarters([
+      { rapidViewId: 1, team: 'A', sprints: [s(10, '2026-01-12', [issue('A-1', 6, [], 5)])] },
+      { rapidViewId: 2, team: 'B', sprints: [s(20, '2026-01-12', [issue('B-1', 4, [], 5)])] },
+    ]);
+    expect(q.teams.map((t) => t.completion.ofStart)).toEqual([1.2, 0.8]);
+    expect(q.completion).toMatchObject({ startPoints: 10, completedPoints: 10, ofStart: 1 });
+  });
+});

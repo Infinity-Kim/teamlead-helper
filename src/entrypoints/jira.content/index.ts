@@ -13,7 +13,6 @@ import {
   calcCapDistribution,
   issueKeysByBucket,
   median,
-  quarterOf,
   groupByQuarter,
   calcQuarterBalance,
   ageThresholdsFromHistory,
@@ -219,13 +218,17 @@ export default defineContentScript({
         const records = await getQuarterSprints(rapidViewId, 10);
         const target = await quarterTarget.getValue();
 
-        // Текущий квартал = квартал активного спринта (или самого свежего по старту).
+        // Текущий квартал = квартал активного спринта (или самого свежего по старту). Квартал
+        // берём из группировки, а не из календаря: спринт со старта в конце квартала может
+        // оказаться первым спринтом следующего (см. assignQuarters).
         const active = records.find((r) => r.state === 'ACTIVE') ?? records[0];
-        const curQuarter = active ? quarterOf(active.startDate) : null;
+        const byQ = groupByQuarter(records);
+        const curQuarter = active
+          ? ([...byQ].find(([, list]) => list.includes(active))?.[0] ?? null)
+          : null;
         if (!curQuarter) {
           quarterBalance = null;
         } else {
-          const byQ = groupByQuarter(records);
           const sprints = byQ.get(curQuarter) ?? [];
           quarterBalance = calcQuarterBalance(curQuarter, sprints, {
             productPct: target.productPct,

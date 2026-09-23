@@ -19,6 +19,7 @@ import {
 } from '@/shared/storage';
 import {
   divisionTeams,
+  SPRINTS_PER_QUARTER,
   type CapSlice,
   type Division,
   type SprintReportDetail,
@@ -35,12 +36,15 @@ import {
   healthVerdict,
   toThresholds,
   divisionQuarters,
-  quarterOf,
+  completionRates,
+  sprintCompletion,
+  nextQuarter,
   CAP_SLICES,
   type QuarterGroup,
   type VelocitySummary,
   type CapBreakdown,
   type DivisionQuarter,
+  type CompletionRates,
   type HealthThresholds,
   type RuleId,
   type RuleResult,
@@ -461,8 +465,32 @@ quarterTarget.watch((v) => (target.value = v));
 
 // --- Сводка дивизиона ---
 
-/** Идёт ли квартал сейчас — у текущего в сводке только закрытые спринты, цифры будут расти. */
-const currentQuarter = quarterOf(new Date().toISOString());
+/**
+ * Идёт ли квартал: это самый свежий квартал сводки, и у какой-то команды в нём меньше
+ * SPRINTS_PER_QUARTER закрытых спринтов. Не по календарю: квартал команды — 6 спринтов, и он
+ * заканчивается раньше календарного (см. assignQuarters).
+ */
+function inProgress(q: DivisionQuarter): boolean {
+  return (
+    q.quarter === division.value?.quarters[0]?.quarter &&
+    q.teams.some((t) => t.sprintCount < SPRINTS_PER_QUARTER)
+  );
+}
+
+/** Доля 0..∞ → «94%»; нет базы → «—». */
+const fmtRate = (r: number | null) => (r === null ? '—' : `${Math.round(r * 100)}%`);
+
+/** Подсказка с исходными числами закрытия: откуда взялись проценты. */
+function completionHint(c: CompletionRates): string {
+  return (
+    `Взяли на старте ${fmtNum(c.startPoints)} SP, к концу стало ${fmtNum(c.finalPoints)} SP ` +
+    `(с докинутым после старта), закрыли ${fmtNum(c.completedPoints)} SP.\n` +
+    `От взятого: ${fmtRate(c.ofStart)} — выполнили ли обещанное на планировании ` +
+    `(больше 100% — закрыли и часть докинутого).\n` +
+    `От итога: ${fmtRate(c.ofFinal)} — сколько успели из всего, что оказалось в спринте; ` +
+    `остальное переехало.`
+  );
+}
 
 /** Product-доля квартала против цели из настроек: в коридоре или нет. */
 function productStatus(b: CapBreakdown): { pct: number; delta: number; ok: boolean } {
@@ -474,17 +502,6 @@ function productStatus(b: CapBreakdown): { pct: number; delta: number; ok: boole
 /** Доля команды в закрытом объёме дивизиона за квартал, %. */
 function shareOf(q: DivisionQuarter, sp: number): number {
   return q.completedSp > 0 ? Math.round((sp / q.completedSp) * 100) : 0;
-}
-
-/** Средний закрытый объём одного спринта по дивизиону за квартал, SP. */
-function divisionPace(q: DivisionQuarter): number {
-  return q.sprintCount > 0 ? q.completedSp / q.sprintCount : 0;
-}
-
-/** SP за спринт команды относительно среднего по дивизиону, %: 100 = на уровне дивизиона. */
-function pctOfDivisionPace(q: DivisionQuarter, spPerSprint: number): number {
-  const pace = divisionPace(q);
-  return pace > 0 ? Math.round((spPerSprint / pace) * 100) : 0;
 }
 
 /** Активное правило на КАЖДЫЙ спринт: sprintId → правило (или отсутствует = не выбрано). */
@@ -924,9 +941,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
             <div class="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
               <h2 class="text-base font-semibold">{{ quarterLabel(q.quarter) }}</h2>
               <span
-                v-if="q.quarter === currentQuarter"
+                v-if="inProgress(q)"
                 class="rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                title="Квартал ещё идёт: учтены только закрытые спринты"
+                :title="`Квартал ещё идёт: закрыто меньше ${SPRINTS_PER_QUARTER} спринтов хотя бы у одной команды. Учтены только закрытые спринты.`"
               >
                 идёт
               </span>
@@ -934,6 +951,17 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 {{ q.sprintCount }} спр. ·
                 <b class="text-slate-700 dark:text-slate-200">{{ fmtNum(q.completedSp) }} SP</b>
                 закрыто
+                <span :title="completionHint(q.completion)" class="cursor-help">
+                  ·
+                  <b class="text-slate-700 dark:text-slate-200">{{
+                    fmtRate(q.completion.ofStart)
+                  }}</b>
+                  от взятого ·
+                  <b class="text-slate-700 dark:text-slate-200">{{
+                    fmtRate(q.completion.ofFinal)
+                  }}</b>
+                  от итога
+                </span>
               </span>
               <span
                 class="ml-auto text-xs font-medium"
@@ -952,6 +980,15 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 </template>
               </span>
             </div>
+
+            <p
+              v-if="q.quarter === division?.quarters[0]?.quarter && !inProgress(q)"
+              class="-mt-1 mb-2 text-[11px] text-slate-400"
+            >
+              Все {{ SPRINTS_PER_QUARTER }} спринтов квартала закрыты.
+              {{ quarterLabel(nextQuarter(q.quarter)) }}
+              появится здесь, когда закроется его первый спринт — в отчёт попадают только закрытые.
+            </p>
 
             <!-- CAP-микс дивизиона + метка цели Product -->
             <div class="relative">
@@ -1003,11 +1040,20 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 >
                   Доля
                 </th>
-                <th
-                  class="px-2 py-2 text-right font-normal"
-                  title="Среднее закрытое за спринт, SP. В скобках — от среднего по дивизиону (100% = на уровне дивизиона)"
-                >
+                <th class="px-2 py-2 text-right font-normal" title="Среднее закрытое за спринт">
                   SP/спр.
+                </th>
+                <th
+                  class="px-2 py-2 text-right font-normal normal-case"
+                  title="Закрыто ÷ взято на старте спринтов. Больше 100% — закрыли и часть докинутого после старта"
+                >
+                  % взятого
+                </th>
+                <th
+                  class="px-2 py-2 text-right font-normal normal-case"
+                  title="Закрыто ÷ итоговый объём спринтов (взятое + докинутое). Остальное переехало"
+                >
+                  % итога
                 </th>
                 <th class="w-2/5 py-2 pl-2 pr-4 font-normal">CAP-микс</th>
               </tr>
@@ -1038,16 +1084,19 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   {{ shareOf(q, t.completedSp) }}%
                 </td>
                 <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
-                  <template v-if="t.spPerSprint === null">—</template>
-                  <template v-else>
-                    {{ fmtNum(t.spPerSprint) }}
-                    <span
-                      class="text-slate-400"
-                      :title="`${pctOfDivisionPace(q, t.spPerSprint)}% от среднего по дивизиону (${fmtNum(divisionPace(q))} SP за спринт)`"
-                    >
-                      ({{ pctOfDivisionPace(q, t.spPerSprint) }}%)
-                    </span>
-                  </template>
+                  {{ t.spPerSprint === null ? '—' : fmtNum(t.spPerSprint) }}
+                </td>
+                <td
+                  class="cursor-help px-2 py-2 text-right tabular-nums"
+                  :title="completionHint(t.completion)"
+                >
+                  {{ fmtRate(t.completion.ofStart) }}
+                </td>
+                <td
+                  class="cursor-help px-2 py-2 text-right tabular-nums"
+                  :title="completionHint(t.completion)"
+                >
+                  {{ fmtRate(t.completion.ofFinal) }}
                 </td>
                 <td class="py-2 pl-2 pr-4">
                   <div v-if="t.breakdown.totalPoints > 0" class="flex items-center gap-2">
@@ -1213,6 +1262,20 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   {{ fmtNum(q.completedSp) }} SP · {{ q.sprints.length }} спр.
                 </span>
               </div>
+              <div
+                class="-mt-1 mb-2 cursor-help text-[11px] text-slate-500 dark:text-slate-400"
+                :title="completionHint(completionRates(q.sprints))"
+              >
+                закрыто
+                <b class="text-slate-700 dark:text-slate-200">{{
+                  fmtRate(completionRates(q.sprints).ofStart)
+                }}</b>
+                от взятого ·
+                <b class="text-slate-700 dark:text-slate-200">{{
+                  fmtRate(completionRates(q.sprints).ofFinal)
+                }}</b>
+                от итога
+              </div>
               <!-- Стек-бар -->
               <div
                 class="flex h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
@@ -1366,6 +1429,18 @@ const CAP_SLICES_ALL = CAP_SLICES;
                       >
                         × сбросить
                       </button>
+                      <span
+                        class="ml-auto cursor-help whitespace-nowrap text-[11px] tabular-nums text-slate-500 dark:text-slate-400"
+                        :title="completionHint(completionRates([s]))"
+                      >
+                        взяли {{ fmtNum(sprintCompletion(s).startPoints) }} → стало
+                        {{ fmtNum(sprintCompletion(s).finalPoints) }} → закрыли
+                        {{ fmtNum(sprintCompletion(s).completedPoints) }}
+                        <b class="text-slate-700 dark:text-slate-200">
+                          ({{ fmtRate(completionRates([s]).ofStart) }} /
+                          {{ fmtRate(completionRates([s]).ofFinal) }})
+                        </b>
+                      </span>
                     </div>
 
                     <!-- Здоровье спринта: 5 правил (скорость/перенос/переоценка/добавлено/выброшено) -->

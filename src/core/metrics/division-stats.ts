@@ -4,6 +4,7 @@ import {
   groupSprintsByQuarter,
   type CapBreakdown,
 } from './sprint-report-stats';
+import { completionRates, type CompletionRates } from './sprint-completion';
 
 /**
  * Квартальная статистика дивизиона — сумма по командам. ЧИСТЫЕ функции. Слой: core/metrics.
@@ -30,6 +31,8 @@ export interface TeamQuarterStats {
   /** Средний объём закрытого за спринт, SP. null — в квартале у команды нет спринтов. */
   spPerSprint: number | null;
   breakdown: CapBreakdown;
+  /** Закрыто от взятого на старте и от итогового объёма спринтов. */
+  completion: CompletionRates;
 }
 
 /** Квартал дивизиона: итог по всем командам + строка на каждую команду. */
@@ -38,6 +41,7 @@ export interface DivisionQuarter {
   sprintCount: number;
   completedSp: number;
   breakdown: CapBreakdown;
+  completion: CompletionRates;
   /** Все команды дивизиона в исходном порядке — и те, у кого в квартале не было спринтов. */
   teams: TeamQuarterStats[];
 }
@@ -71,6 +75,7 @@ export function divisionQuarters(teams: readonly TeamSprints[]): DivisionQuarter
           completedSp,
           spPerSprint: sprints.length ? round1(completedSp / sprints.length) : null,
           breakdown: aggregateCapBreakdown(sprints),
+          completion: completionRates(sprints),
         };
       });
       const all = perTeam.flatMap(({ byQuarter }) => byQuarter.get(quarter)?.sprints ?? []);
@@ -79,6 +84,7 @@ export function divisionQuarters(teams: readonly TeamSprints[]): DivisionQuarter
         sprintCount: all.length,
         completedSp: round1(rows.reduce((s, r) => s + r.completedSp, 0)),
         breakdown: aggregateCapBreakdown(all),
+        completion: completionRates(all),
         teams: rows,
       };
     });
