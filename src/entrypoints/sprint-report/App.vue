@@ -476,6 +476,17 @@ function shareOf(q: DivisionQuarter, sp: number): number {
   return q.completedSp > 0 ? Math.round((sp / q.completedSp) * 100) : 0;
 }
 
+/** Средний закрытый объём одного спринта по дивизиону за квартал, SP. */
+function divisionPace(q: DivisionQuarter): number {
+  return q.sprintCount > 0 ? q.completedSp / q.sprintCount : 0;
+}
+
+/** SP за спринт команды относительно среднего по дивизиону, %: 100 = на уровне дивизиона. */
+function pctOfDivisionPace(q: DivisionQuarter, spPerSprint: number): number {
+  const pace = divisionPace(q);
+  return pace > 0 ? Math.round((spPerSprint / pace) * 100) : 0;
+}
+
 /** Активное правило на КАЖДЫЙ спринт: sprintId → правило (или отсутствует = не выбрано). */
 const ruleFilter = ref<Map<number, RuleId>>(new Map());
 
@@ -749,14 +760,34 @@ const CAP_SLICES_ALL = CAP_SLICES;
       <div class="mb-6 flex flex-wrap items-center gap-3">
         <label class="flex items-center gap-2">
           <span class="text-xs font-medium uppercase tracking-wide text-slate-400">Дивизион</span>
-          <select
-            :value="selectedDivisionId"
-            :disabled="loading || divisionOptions.length < 2"
-            class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm font-medium outline-none focus:border-indigo-500 disabled:opacity-100 dark:border-slate-700 dark:bg-slate-900"
-            @change="selectDivision(($event.target as HTMLSelectElement).value)"
-          >
-            <option v-for="d in divisionOptions" :key="d.id" :value="d.id">{{ d.name }}</option>
-          </select>
+          <!--
+            Системная стрелка select прижата к тексту и отличается между ОС — рисуем свою
+            с отступом. При одном дивизионе выбирать не из чего: стрелку прячем.
+          -->
+          <span class="relative inline-flex">
+            <select
+              :value="selectedDivisionId"
+              :disabled="loading || divisionOptions.length < 2"
+              class="appearance-none rounded-md border border-slate-300 bg-white py-1.5 pl-3 text-sm font-medium outline-none focus:border-indigo-500 disabled:cursor-default disabled:opacity-100 dark:border-slate-700 dark:bg-slate-900"
+              :class="divisionOptions.length > 1 ? 'cursor-pointer pr-8' : 'pr-3'"
+              @change="selectDivision(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="d in divisionOptions" :key="d.id" :value="d.id">{{ d.name }}</option>
+            </select>
+            <svg
+              v-if="divisionOptions.length > 1"
+              class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="M4 6l4 4 4-4" />
+            </svg>
+          </span>
         </label>
         <div
           v-if="currentTeams.length"
@@ -972,7 +1003,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 >
                   Доля
                 </th>
-                <th class="px-2 py-2 text-right font-normal" title="Среднее закрытое за спринт">
+                <th
+                  class="px-2 py-2 text-right font-normal"
+                  title="Среднее закрытое за спринт, SP. В скобках — от среднего по дивизиону (100% = на уровне дивизиона)"
+                >
                   SP/спр.
                 </th>
                 <th class="w-2/5 py-2 pl-2 pr-4 font-normal">CAP-микс</th>
@@ -1004,7 +1038,16 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   {{ shareOf(q, t.completedSp) }}%
                 </td>
                 <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
-                  {{ t.spPerSprint === null ? '—' : fmtNum(t.spPerSprint) }}
+                  <template v-if="t.spPerSprint === null">—</template>
+                  <template v-else>
+                    {{ fmtNum(t.spPerSprint) }}
+                    <span
+                      class="text-slate-400"
+                      :title="`${pctOfDivisionPace(q, t.spPerSprint)}% от среднего по дивизиону (${fmtNum(divisionPace(q))} SP за спринт)`"
+                    >
+                      ({{ pctOfDivisionPace(q, t.spPerSprint) }}%)
+                    </span>
+                  </template>
                 </td>
                 <td class="py-2 pl-2 pr-4">
                   <div v-if="t.breakdown.totalPoints > 0" class="flex items-center gap-2">

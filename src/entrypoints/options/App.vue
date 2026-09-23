@@ -353,13 +353,27 @@ async function save() {
               class="flex items-center gap-2 text-xs text-slate-500"
             >
               в дивизион
-              <select
-                v-model="newTeamDivision"
-                class="rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-              >
-                <option v-for="d in divisionList" :key="d.id" :value="d.id">{{ d.name }}</option>
-                <option value="">— без дивизиона —</option>
-              </select>
+              <span class="relative inline-flex">
+                <select
+                  v-model="newTeamDivision"
+                  class="cursor-pointer appearance-none rounded-md border border-slate-300 bg-white py-1.5 pl-3 pr-8 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+                >
+                  <option v-for="d in divisionList" :key="d.id" :value="d.id">{{ d.name }}</option>
+                  <option value="">— без дивизиона —</option>
+                </select>
+                <svg
+                  class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.8"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 6l4 4 4-4" />
+                </svg>
+              </span>
             </label>
             <button
               type="button"
@@ -538,14 +552,28 @@ async function save() {
 
           <label class="mt-3 block">
             <span class="mb-1 block text-xs font-medium">Где показывать квартальный баланс</span>
-            <select
-              v-model="qMode"
-              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-            >
-              <option v-for="m in QUARTER_MODES" :key="m.value" :value="m.value">
-                {{ m.label }}
-              </option>
-            </select>
+            <span class="relative block">
+              <select
+                v-model="qMode"
+                class="w-full cursor-pointer appearance-none rounded-md border border-slate-300 bg-white py-1.5 pl-3 pr-8 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              >
+                <option v-for="m in QUARTER_MODES" :key="m.value" :value="m.value">
+                  {{ m.label }}
+                </option>
+              </select>
+              <svg
+                class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400"
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M4 6l4 4 4-4" />
+              </svg>
+            </span>
             <span class="mt-1 block text-xs text-slate-400">
               Переключай и смотри на доске/в панели, какой вариант удобнее.
             </span>
