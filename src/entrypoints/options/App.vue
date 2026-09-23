@@ -228,8 +228,7 @@ async function save() {
             class="w-24 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
           />
           <span class="mt-1 block text-xs text-slate-400">
-            Сколько последних закрытых спринтов брать для медианы velocity, трендов (throughput,
-            say/do, carryover), прогноза Monte Carlo и порогов возраста задач.
+            Сколько последних закрытых спринтов брать для медианы velocity и порогов возраста задач.
           </span>
         </label>
 

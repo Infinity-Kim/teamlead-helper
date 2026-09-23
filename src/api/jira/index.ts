@@ -1,6 +1,5 @@
 import type {
   BoardBacklog,
-  SprintOutcome,
   SprintRecord,
   SprintReportDetail,
   SprintReportsResult,
@@ -160,41 +159,6 @@ export async function getQuarterSprints(
       };
     })
     .filter((r) => r.startDate !== '');
-}
-
-/**
- * Итоги последних `lastN` ЗАКРЫТЫХ спринтов — для reliability (say/do), throughput и forecast.
- * Хронологический порядок: СВЕЖИЕ В КОНЦЕ (тренды/спарклайны читаются слева направо по времени).
- *
- * committed = allIssuesEstimateSum (baseline на планировании — заморожен; поздние добавления
- * в него не входят, это семантика Jira Velocity Chart). completed = completedIssuesEstimateSum.
- * completedCount = число Done-задач (throughput — счёт, не SP; устойчив к инфляции оценок).
- */
-export async function getSprintOutcomes(
-  rapidViewId: number,
-  lastN: number,
-): Promise<SprintOutcome[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
-  return ok
-    .map(({ sprint, report }): SprintOutcome => {
-      const c = report.contents;
-      // carryover = взятые, но не завершённые задачи (переносятся дальше): в SP И в задачах.
-      const notDone = c?.issuesNotCompletedInCurrentSprint ?? [];
-      const carryoverPoints = notDone.reduce(
-        (sum, i) => sum + (i.currentEstimateStatistic?.statFieldValue?.value ?? 0),
-        0,
-      );
-      return {
-        id: sprint.id,
-        name: sprint.name,
-        committedPoints: c?.allIssuesEstimateSum?.value ?? 0,
-        completedPoints: c?.completedIssuesEstimateSum?.value ?? 0,
-        completedCount: c?.completedIssues?.length ?? 0,
-        carryoverPoints: +carryoverPoints.toFixed(1),
-        carryoverCount: notDone.length,
-      };
-    })
-    .reverse(); // fetchRecentSprintReports отдаёт от свежих к старым — разворачиваем в хронологию
 }
 
 /** Переходы статусов одной задачи через changelog (или [] при ошибке — не роняем весь расчёт). */

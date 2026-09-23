@@ -5,7 +5,6 @@ import {
   getBoardBacklog,
   getSprintVelocities,
   getQuarterSprints,
-  getSprintOutcomes,
   getAgingIssues,
   getCycleTimeHistory,
 } from '@/api/jira';
@@ -17,11 +16,6 @@ import {
   quarterOf,
   groupByQuarter,
   calcQuarterBalance,
-  calcThroughputTrend,
-  calcReliabilityTrend,
-  calcCarryoverTrend,
-  forecastThroughput,
-  seededRng,
   ageThresholdsFromHistory,
   calcAgingIssues,
   type IssueAge,
@@ -43,9 +37,6 @@ import type {
   CapSlice,
   SprintCapStats,
   QuarterBalance,
-  QuarterTrends,
-  ThroughputForecast,
-  ReliabilityTrend,
 } from '@/core/domain';
 
 /**
@@ -78,9 +69,6 @@ interface CapBarProps {
   activeBuckets: CapSlice[];
   medianSp: number | null;
   refreshing: boolean;
-  // Планировочные метрики — только у активного спринта (у остальных null).
-  forecast: ThroughputForecast | null;
-  reliability: ReliabilityTrend | null;
 }
 interface Mounted {
   app: VueApp;
@@ -155,12 +143,7 @@ export default defineContentScript({
     let medianSp: number | null = null;
     // Квартальный баланс текущего квартала (того, где активный спринт). null — нет данных.
     let quarterBalance: QuarterBalance | null = null;
-    // Квартальные тренды (throughput/say-do/carryover). null — нет истории.
-    let quarterTrends: QuarterTrends | null = null;
-    // Прогноз Monte Carlo и say/do тренд — для АКТИВНОГО спринта. null — нет истории.
-    let sprintForecast: ThroughputForecast | null = null;
-    let reliabilityTrend: ReliabilityTrend | null = null;
-    // Id активного спринта на доске (для привязки forecast/reliability только к нему).
+    // Id активного спринта на доске (для подсветки застревающих задач).
     let activeSprintId: number | null = null;
     // Возраст застревающих задач (aging/stuck) по ключу — для подсветки карточек. Пусто — нет.
     let agingByKey = new Map<string, IssueAge>();
@@ -172,7 +155,6 @@ export default defineContentScript({
       balance: QuarterBalance;
       targetPct: number;
       bandPp: number;
-      trends: QuarterTrends | null;
     } | null = null;
 
     /** Отпечаток данных — чтобы не перерисовывать, если ничего по сути не изменилось. */
@@ -199,7 +181,7 @@ export default defineContentScript({
       const topLevel = backlog.issues.filter((i) => i.hierarchyLevel === 0);
       unlabeledKeys = new Set(issueKeysByBucket(topLevel).Unlabeled);
 
-      // Активный спринт доски — к нему привяжем forecast/say-do (у остальных эти метрики null).
+      // Активный спринт доски — по нему считается возраст задач (Work Item Age).
       activeSprintId = backlog.sprints.find((s) => s.state === 'ACTIVE')?.id ?? null;
 
       statsBySprintId.clear();
@@ -253,55 +235,6 @@ export default defineContentScript({
         renderQuarterBlock();
       } catch (e) {
         console.warn('[TLH] loadQuarter failed:', e);
-      }
-    }
-
-    /**
-     * Загрузить предсказуемость: throughput/say-do/carryover тренды (квартал) + Monte Carlo прогноз
-     * и say-do (активный спринт). Источник — история закрытых спринтов (getSprintOutcomes). N+1 фоном.
-     */
-    async function loadPredictability() {
-      try {
-        const rapidViewId = await resolveRapidViewId();
-        const n = await sprintHistoryCount.getValue();
-        const outcomes = await getSprintOutcomes(rapidViewId, n);
-        if (outcomes.length === 0) {
-          quarterTrends = null;
-          sprintForecast = null;
-          reliabilityTrend = null;
-          return;
-        }
-        const reliability = calcReliabilityTrend(outcomes);
-        quarterTrends = {
-          throughput: calcThroughputTrend(outcomes),
-          reliability,
-          carryover: calcCarryoverTrend(outcomes),
-        };
-        reliabilityTrend = reliability;
-
-        // Прогноз на 1 спринт вперёд по историческому throughput (кол-во задач — канон Vacanti/MC).
-        // seed из суммы истории — стабилен между рендерами, детерминирован (Math.random избегаем).
-        const history = outcomes.map((o) => o.completedCount);
-        const seed = history.reduce((a, c) => a + c, 0) * 2654435761 + history.length;
-        const countFc = forecastThroughput(history, 1, 10_000, seededRng(seed));
-        // Параллельный прогноз в SP (справочно, для привязки к capacity-балансу в SP).
-        const spHistory = outcomes.map((o) => o.completedPoints);
-        const spSeed = Math.round(spHistory.reduce((a, c) => a + c, 0)) * 40503 + spHistory.length;
-        const spFc = forecastThroughput(spHistory, 1, 10_000, seededRng(spSeed));
-        sprintForecast = countFc
-          ? { ...countFc, sp: spFc ? { p85: spFc.p85, p50: spFc.p50, p15: spFc.p15 } : null }
-          : null;
-
-        // Прокинуть в уже смонтированные виджеты активного спринта + квартальную панель.
-        for (const m of mounted.values()) {
-          if (m.sprintId === activeSprintId) {
-            m.props.forecast = sprintForecast;
-            m.props.reliability = reliabilityTrend;
-          }
-        }
-        if (quarterProps) quarterProps.trends = quarterTrends;
-      } catch (e) {
-        console.warn('[TLH] loadPredictability failed:', e);
       }
     }
 
@@ -374,13 +307,11 @@ export default defineContentScript({
           balance: quarterBalance,
           targetPct: target.productPct,
           bandPp: target.bandPp,
-          trends: quarterTrends,
         });
       } else {
         quarterProps.balance = quarterBalance;
         quarterProps.targetPct = target.productPct;
         quarterProps.bandPp = target.bandPp;
-        quarterProps.trends = quarterTrends;
       }
 
       // Хост пересоздаём, только если потерялся/переехал; вместе с ним — Vue-приложение.
@@ -408,7 +339,6 @@ export default defineContentScript({
               balance: p.balance,
               targetPct: p.targetPct,
               bandPp: p.bandPp,
-              trends: p.trends,
             }),
         });
         quarterApp.mount(quarterHost);
@@ -789,16 +719,12 @@ export default defineContentScript({
       sprintId: number,
       stats: SprintCapStats,
     ) {
-      const isActive = sprintId === activeSprintId;
       const props = reactive<CapBarProps>({
         stats,
         targetProductPct: targets.Product,
         activeBuckets: activeSlices(),
         medianSp,
         refreshing,
-        // forecast/say-do — только у активного спринта (у остальных нет «плана в работе»).
-        forecast: isActive ? sprintForecast : null,
-        reliability: isActive ? reliabilityTrend : null,
       });
       const app = createApp({
         render: () =>
@@ -808,8 +734,6 @@ export default defineContentScript({
             activeBuckets: props.activeBuckets,
             medianSp: props.medianSp,
             refreshing: props.refreshing,
-            forecast: props.forecast,
-            reliability: props.reliability,
             onBucketClick: (b: CapSlice) => onBucketClick(sprintId, b),
             onClearAll,
             onRefresh: () => void refresh(),
@@ -875,9 +799,6 @@ export default defineContentScript({
       unlabeledDecorated = false;
       agingByKey = new Map();
       agingDecorated = false;
-      quarterTrends = null;
-      sprintForecast = null;
-      reliabilityTrend = null;
       quarterBalance = null;
       quarterApp?.unmount();
       quarterApp = null;
@@ -894,7 +815,6 @@ export default defineContentScript({
       mark('rendered');
       void loadMedian(); // медиана грузится фоном (N+1 запросов) — не блокирует основной рендер
       void loadQuarter(); // квартальный баланс — тоже фоном
-      void loadPredictability(); // throughput/say-do/carryover тренды + forecast — фоном
       void loadAging(); // возраст застревающих задач (changelog N+1) — фоном
     } catch (e) {
       mark('error:' + (e instanceof Error ? e.message : String(e)));
@@ -935,7 +855,6 @@ export default defineContentScript({
           .then(renderAll)
           .then(loadMedian)
           .then(loadQuarter)
-          .then(loadPredictability)
           .then(loadAging)
           .catch(() => {});
         return;
@@ -974,13 +893,11 @@ export default defineContentScript({
       void refresh().then(renderAll);
       void loadMedian();
       void loadQuarter();
-      void loadPredictability();
       void loadAging();
     });
-    // Изменили N (сколько спринтов в историю) — пересчитать медиану, тренды, пороги возраста.
+    // Изменили N (сколько спринтов в историю) — пересчитать медиану и пороги возраста.
     sprintHistoryCount.watch(() => {
       void loadMedian();
-      void loadPredictability();
       void loadAging();
     });
     // Квартальная цель / режим UI — перезагрузить квартальный баланс.
