@@ -317,8 +317,8 @@ async function save() {
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="mb-1 text-sm font-semibold">Здоровье спринта (пороги)</h2>
           <p class="mb-3 text-xs text-slate-400">
-            Правила на странице «Отчёт по спринтам»: спринт вне нормы помечается янтарным чипом.
-            Это ориентиры для планирования, а не оценка команды — меняйте под свои договорённости.
+            Правила на странице «Отчёт по спринтам»: спринт вне нормы помечается янтарным чипом. Это
+            ориентиры для планирования, а не оценка команды — меняйте под свои договорённости.
           </p>
           <div class="grid gap-3 sm:grid-cols-2">
             <label v-for="f in HEALTH_FIELDS" :key="f.key" class="block">
@@ -343,8 +343,9 @@ async function save() {
           <p class="mb-3 text-xs text-slate-400">
             Нужен для отдельной страницы «Отчёт по спринтам» (по кнопке в popup). Используется
             Basic-авторизация: рабочий email + персональный API-токен Atlassian. Токен создаётся в
-            <span class="font-mono">id.atlassian.com → Security → API tokens</span> и хранится только
-            локально в браузере (не синхронизируется, не отправляется никуда, кроме самой Jira).
+            <span class="font-mono">id.atlassian.com → Security → API tokens</span> и хранится
+            только локально в браузере (не синхронизируется, не отправляется никуда, кроме самой
+            Jira).
           </p>
           <label class="block">
             <span class="mb-1 block text-xs font-medium">Base URL</span>
@@ -375,8 +376,8 @@ async function save() {
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
             <span class="mt-1 block text-xs text-slate-400">
-              Сохраняется, только если заполнены и email, и токен. Токен можно отозвать в любой момент
-              в настройках Atlassian.
+              Сохраняется, только если заполнены и email, и токен. Токен можно отозвать в любой
+              момент в настройках Atlassian.
             </span>
           </label>
         </div>

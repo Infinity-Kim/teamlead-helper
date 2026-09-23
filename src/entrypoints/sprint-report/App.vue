@@ -400,9 +400,7 @@ function summaryValue(rs: RuleSummary): string {
 }
 
 /** Главный вывод по окну: что чинить, почему и что уже наладилось. */
-const verdict = computed(() =>
-  report.value ? healthVerdict(report.value.healthSummary) : null,
-);
+const verdict = computed(() => (report.value ? healthVerdict(report.value.healthSummary) : null));
 
 /**
  * Формулировка проблемы человеческим языком. Опирается на причинно-следственную модель
@@ -437,8 +435,7 @@ const verdictText = computed(() => {
     if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'спринтах';
     return 'спринтах';
   };
-  const ref =
-    f.rule === 'punted' ? `${fmtNum(f.threshold)} задач` : fmtPct(f.threshold);
+  const ref = f.rule === 'punted' ? `${fmtNum(f.threshold)} задач` : fmtPct(f.threshold);
   const parts: string[] = [
     `Так в ${f.warnCount} ${plural(f.warnCount)} из ${f.evaluated}${v.chronic ? ' — это уже привычка, а не случайность' : ''}. Ориентир — ${ref}.`,
   ];
@@ -461,15 +458,17 @@ const improvedText = computed(() => {
   // Для «выброшено» единица — задачи, и дробное «0.3 задачи» бессмысленно: округляем.
   const fmtBy = (rule: RuleId, v: number | null) =>
     rule === 'punted' ? String(Math.round(v ?? 0)) : fmtPct(v);
-  return (verdict.value?.improved ?? [])
-    .map((s) => ({
-      rule: s.rule,
-      text: IMPROVED[s.rule],
-      from: fmtBy(s.rule, s.olderAvg),
-      to: fmtBy(s.rule, s.recentAvg),
-    }))
-    // Если после округления «было» и «стало» совпали, улучшение не читается — не показываем.
-    .filter((s) => s.from !== s.to);
+  return (
+    (verdict.value?.improved ?? [])
+      .map((s) => ({
+        rule: s.rule,
+        text: IMPROVED[s.rule],
+        from: fmtBy(s.rule, s.olderAvg),
+        to: fmtBy(s.rule, s.recentAvg),
+      }))
+      // Если после округления «было» и «стало» совпали, улучшение не читается — не показываем.
+      .filter((s) => s.from !== s.to)
+  );
 });
 
 /** Направление словом + «хорошо ли это» для конкретного правила (рост всех пяти — плохо). */
@@ -620,12 +619,11 @@ const CAP_SLICES_ALL = CAP_SLICES;
         v-if="!loading && !error && totalSprints"
         class="mb-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400"
       >
-        <span
-          v-for="slice in CAP_SLICES_ALL"
-          :key="slice"
-          class="inline-flex items-center gap-1.5"
-        >
-          <span class="inline-block size-2.5 rounded-sm" :style="{ background: sliceColor(slice) }" />
+        <span v-for="slice in CAP_SLICES_ALL" :key="slice" class="inline-flex items-center gap-1.5">
+          <span
+            class="inline-block size-2.5 rounded-sm"
+            :style="{ background: sliceColor(slice) }"
+          />
           {{ SLICE_LABEL[slice] }}
         </span>
       </div>
@@ -686,7 +684,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
       </div>
 
       <!-- Пусто -->
-      <div v-else-if="!report || totalSprints === 0" class="py-16 text-center text-sm text-slate-400">
+      <div
+        v-else-if="!report || totalSprints === 0"
+        class="py-16 text-center text-sm text-slate-400"
+      >
         Нет закрытых спринтов с 2025 года для выбранной команды.
       </div>
 
@@ -734,7 +735,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
               <p class="text-sm font-medium text-slate-800 dark:text-slate-100">
                 {{ verdictText.headline }}
               </p>
-              <p v-if="verdictText.detail" class="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+              <p
+                v-if="verdictText.detail"
+                class="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300"
+              >
                 {{ verdictText.detail }}
               </p>
               <p
@@ -743,7 +747,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
               >
                 Наладилось:
                 <span v-for="(im, idx) in improvedText" :key="im.rule">
-                  {{ im.text }} ({{ im.from }} → {{ im.to }}){{ idx < improvedText.length - 1 ? ', ' : '' }}
+                  {{ im.text }} ({{ im.from }} → {{ im.to }}){{
+                    idx < improvedText.length - 1 ? ', ' : ''
+                  }}
                 </span>
               </p>
             </div>
@@ -754,9 +760,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
             >
               типично за 6 спринтов / ориентир · динамика
             </p>
-            <div
-              class="grid gap-x-6 gap-y-1.5 px-4 pb-2.5 pt-1.5 sm:grid-cols-2 xl:grid-cols-3"
-            >
+            <div class="grid gap-x-6 gap-y-1.5 px-4 pb-2.5 pt-1.5 sm:grid-cols-2 xl:grid-cols-3">
               <!--
                 Сетка внутри строки, а не flex с ml-auto: при узкой колонке значения
                 переносились на вторую строку и подписи соседних правил слипались.
@@ -824,13 +828,18 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 />
               </div>
               <!-- Числа под баром -->
-              <div class="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              <div
+                class="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400"
+              >
                 <span
                   v-for="s in nonEmpty(q.breakdown)"
                   :key="s.slice"
                   class="inline-flex items-center gap-1"
                 >
-                  <span class="inline-block size-2 rounded-sm" :style="{ background: sliceColor(s.slice) }" />
+                  <span
+                    class="inline-block size-2 rounded-sm"
+                    :style="{ background: sliceColor(s.slice) }"
+                  />
                   {{ SLICE_LABEL[s.slice] }} {{ s.pct }}%
                   <span class="text-slate-400">({{ fmtNum(s.points) }})</span>
                 </span>
@@ -874,7 +883,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
                       <span class="w-28 shrink-0 font-mono text-sm font-medium">{{ s.name }}</span>
 
                       <!-- Мини CAP-бар спринта -->
-                      <span class="flex h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                      <span
+                        class="flex h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+                      >
                         <span
                           v-for="cs in nonEmpty(sprintCapBreakdown(s))"
                           :key="cs.slice"
@@ -886,7 +897,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
 
                       <!-- Completed SP -->
                       <span class="flex items-baseline gap-1">
-                        <span class="text-lg font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+                        <span
+                          class="text-lg font-bold tabular-nums text-emerald-600 dark:text-emerald-400"
+                        >
                           {{ s.completedPoints }}
                         </span>
                         <span class="text-xs text-slate-400">SP</span>
@@ -993,8 +1006,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
                           {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
                           <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
-                            · {{ Math.round(Math.abs(activeEvidence(s.sprintId)!.result.value!) * 100) }}%
-                            при пороге
+                            ·
+                            {{
+                              Math.round(Math.abs(activeEvidence(s.sprintId)!.result.value!) * 100)
+                            }}% при пороге
                             {{ Math.round(activeEvidence(s.sprintId)!.result.threshold * 100) }}%
                           </template>
                         </span>
@@ -1028,7 +1043,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
                               {{ contribution(e) }}
                             </span>
                           </div>
-                          <div class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300">
+                          <div
+                            class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300"
+                          >
                             {{ e.issue?.summary || '—' }}
                           </div>
                           <div
@@ -1052,7 +1069,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
 
                     <table class="w-full text-sm">
                       <thead>
-                        <tr class="text-left font-mono text-[11px] uppercase tracking-wide text-slate-400">
+                        <tr
+                          class="text-left font-mono text-[11px] uppercase tracking-wide text-slate-400"
+                        >
                           <th class="py-2 pl-11 pr-2 font-normal">Задача</th>
                           <th class="px-2 py-2 font-normal">Тип</th>
                           <th class="px-2 py-2 font-normal">Статус</th>
@@ -1082,7 +1101,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
                                 {{ capLabel(issue) }}
                               </span>
                             </div>
-                            <div class="mt-0.5 max-w-md truncate text-xs text-slate-500 dark:text-slate-400">
+                            <div
+                              class="mt-0.5 max-w-md truncate text-xs text-slate-500 dark:text-slate-400"
+                            >
                               {{ issue.summary }}
                             </div>
                           </td>
@@ -1097,7 +1118,9 @@ const CAP_SLICES_ALL = CAP_SLICES;
                               {{ issue.status }}
                             </span>
                           </td>
-                          <td class="px-2 py-2 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
+                          <td
+                            class="px-2 py-2 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300"
+                          >
                             {{ fmtSp(issue.points) }}
                           </td>
                         </tr>
