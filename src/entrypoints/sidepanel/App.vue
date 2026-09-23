@@ -46,8 +46,8 @@ function openOptions() {
       <section class="mt-4 rounded-lg border border-slate-200 p-4 dark:border-slate-800">
         <h2 class="mb-1 text-sm font-medium">Отчёт по спринтам</h2>
         <p class="text-sm text-slate-500 dark:text-slate-400">
-          Спринты команды с 2025 года по кварталам: velocity, распределение по CAP-бакетам (%/SP) и
-          клик-фильтр задач по бакету. Точные данные Jira Sprint Report.
+          Квартальная сводка по дивизиону (по умолчанию Games) и отчёт каждой команды: velocity,
+          CAP-микс (%/SP), клик-фильтр задач. Команды и дивизионы — в настройках.
         </p>
       </section>
 

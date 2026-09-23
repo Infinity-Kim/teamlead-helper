@@ -9,13 +9,22 @@ import {
 import { sendMessage } from '@/shared/messaging';
 import {
   jiraCreds,
-  TEAM_BOARDS,
-  boardConfig,
+  teams,
+  divisions,
+  quarterTarget,
   sprintReportCache,
   sprintHealthThresholds,
   SPRINT_CACHE_LIMIT,
+  type QuarterTargetConfig,
 } from '@/shared/storage';
-import type { SprintReportDetail, SprintReportIssue, CapSlice } from '@/core/domain';
+import {
+  divisionTeams,
+  type CapSlice,
+  type Division,
+  type SprintReportDetail,
+  type SprintReportIssue,
+  type TeamBoard,
+} from '@/core/domain';
 import {
   groupSprintsByQuarter,
   sprintCapBreakdown,
@@ -25,10 +34,13 @@ import {
   healthSummary,
   healthVerdict,
   toThresholds,
+  divisionQuarters,
+  quarterOf,
   CAP_SLICES,
   type QuarterGroup,
   type VelocitySummary,
   type CapBreakdown,
+  type DivisionQuarter,
   type HealthThresholds,
   type RuleId,
   type RuleResult,
@@ -44,6 +56,8 @@ import HealthChips from '@/components/HealthChips.vue';
 const SINCE_ISO = '2025-10-01';
 /** Окно для average velocity. */
 const VELOCITY_WINDOW = 6;
+/** Псевдо-дивизион для включённых команд, не попавших ни в один дивизион. */
+const OTHERS_ID = '__others__';
 
 /** Отчёт одной команды: сырьё + предрасчитанные агрегаты. */
 interface TeamReport {
@@ -73,6 +87,9 @@ const usingTab = ref(false);
 /** Ждём, пока вкладка Jira догрузится — объясняем пользователю паузу. */
 const waitingTab = ref(false);
 
+/** Хост Jira для ссылок на задачи: из настроек токена, иначе рабочий инстанс по умолчанию. */
+const jiraBase = ref('https://tvbet.atlassian.net');
+
 /**
  * Дождаться готовности вкладки Jira, опрашивая background короткими запросами.
  * Ожидание держим НА СТРАНИЦЕ: MV3-воркер выгружается после ~30 с бездействия и порвал бы
@@ -88,12 +105,11 @@ async function waitJiraTabReady(timeoutMs = 30_000): Promise<{ ready: boolean; p
 }
 
 /** Собрать TeamReport из сырья спринтов. */
-function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number): TeamReport {
-  const meta = TEAM_BOARDS.find((b) => b.rapidViewId === rvid);
+function buildReport(team: TeamBoard, sprints: SprintReportDetail[], failed: number): TeamReport {
   const t = thresholds.value;
   return {
-    team: meta?.team ?? `board ${rvid}`,
-    rapidViewId: rvid,
+    team: team.name,
+    rapidViewId: team.rapidViewId,
     sprints,
     quarters: groupSprintsByQuarter(sprints),
     velocity: velocitySummary(sprints, VELOCITY_WINDOW),
@@ -106,10 +122,45 @@ function buildReport(rvid: number, sprints: SprintReportDetail[], failed: number
 
 const loading = ref(true);
 const error = ref<string | null>(null);
+/** Что сейчас грузится — для дивизиона показываем, какая команда из скольких. */
+const progress = ref<string | null>(null);
+
+/** Команды и дивизионы из настроек. */
+const teamList = ref<TeamBoard[]>([]);
+const divisionList = ref<Division[]>([]);
+const target = ref<QuarterTargetConfig>({ productPct: 67, bandPp: 5 });
+
+/**
+ * Дивизионы для выбора. Включённые команды вне всех дивизионов не должны теряться —
+ * для них добавляется псевдо-дивизион «Другие команды».
+ */
+const divisionOptions = computed<Division[]>(() => {
+  const inDivision = new Set(divisionList.value.flatMap((d) => d.teamIds));
+  const others = teamList.value.filter((t) => t.enabled && !inDivision.has(t.rapidViewId));
+  const list = [...divisionList.value];
+  if (others.length) {
+    list.push({ id: OTHERS_ID, name: 'Другие команды', teamIds: others.map((t) => t.rapidViewId) });
+  }
+  return list;
+});
+
+const selectedDivisionId = ref<string>('');
+const selectedDivision = computed(
+  () => divisionOptions.value.find((d) => d.id === selectedDivisionId.value) ?? null,
+);
+/** Включённые команды выбранного дивизиона — это вкладки. */
+const currentTeams = computed(() =>
+  selectedDivision.value ? divisionTeams(selectedDivision.value, teamList.value) : [],
+);
+
+/** Что открыто: сводка дивизиона или конкретная команда (rapidViewId). */
+const view = ref<'division' | number>('division');
+
 /** Отчёт по ВЫБРАННОЙ команде (грузим только её — не тянем лишнее). */
 const report = ref<TeamReport | null>(null);
-/** rapidViewId выбранной команды. Дефолт — из boardConfig (там ELCAS/80). */
-const selectedRvid = ref<number>(TEAM_BOARDS[0].rapidViewId);
+/** Сводка выбранного дивизиона по кварталам. */
+const division = ref<{ quarters: DivisionQuarter[]; failed: number } | null>(null);
+
 /** Раскрытые кварталы: `${quarterId}`. */
 const openQuarters = ref<Set<string>>(new Set());
 /** Раскрытые спринты: `${sprintId}`. */
@@ -216,63 +267,108 @@ async function writeSprintCache(fetched: ReadonlyMap<number, SprintReportDetail>
 }
 
 /**
- * Загрузить отчёт выбранной команды. force=true (кнопка «Обновить») минует кеши.
- *
- * Отчёты закрытых спринтов кешируются БЕССРОЧНО по sprintId, поэтому сеть трогается только
- * для новых спринтов: первое открытие ~14 запросов, последующие — 2 (список) + 0–1.
+ * Настроить доступ к Jira. Два пути: токен — основной (работает всегда). Без токена идём
+ * через ОТКРЫТУЮ вкладку Jira: там живут cookie сессии SSO, и запросы делает content-script.
+ * false — доступа нет, текст ошибки уже выставлен.
  */
-async function load(force = false) {
-  const rvid = selectedRvid.value;
+async function ensureAccess(): Promise<boolean> {
+  const creds = await jiraCreds.getValue();
+  if (creds) {
+    setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
+    setJiraTabTransport(null);
+    usingTab.value = false;
+    jiraBase.value = creds.baseUrl;
+    return true;
+  }
+  // Ждём ГОТОВНОСТИ вкладки, а не просто её наличия: Jira SPA поднимает content-script
+  // секунды, и без ожидания первый же запрос падал бы — пользователь видел бы ошибку
+  // вместо данных. Цикл живёт здесь: страница не выгружается, в отличие от MV3-воркера.
+  waitingTab.value = true;
+  const { ready, present } = await waitJiraTabReady();
+  waitingTab.value = false;
+  if (!ready) {
+    error.value = present
+      ? 'Вкладка Jira ещё не загрузилась. Дождитесь, пока откроется доска, и нажмите «Повторить».'
+      : 'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
+        'либо укажите email и API-токен в настройках расширения.';
+    return false;
+  }
+  setJiraAuth(null);
+  setJiraTabTransport((path) => sendMessage('jiraFetch', { path }));
+  usingTab.value = true;
+  return true;
+}
 
-  // 1) Кеш в памяти страницы — мгновенно.
-  if (!force) {
-    const cached = memCache.get(rvid);
-    if (cached) {
-      applyReport(cached);
-      return;
-    }
+/**
+ * Отчёт одной команды. Отчёты закрытых спринтов кешируются БЕССРОЧНО по sprintId, поэтому
+ * сеть трогается только для новых спринтов: первое открытие ~14 запросов, дальше — 2 + 0–1.
+ * fresh: 'list' — перечитать список спринтов (новые закрытые), 'all' — ещё и все отчёты.
+ */
+async function loadTeam(team: TeamBoard, fresh: 'none' | 'list' | 'all'): Promise<TeamReport> {
+  const mem = fresh === 'none' ? memCache.get(team.rapidViewId) : undefined;
+  if (mem) return mem;
+  // Отдаём загрузчику всё, что уже есть — он дотянет только недостающее.
+  const cached = fresh === 'all' ? new Map<number, SprintReportDetail>() : await readSprintCache();
+  const { sprints, failed, fetched } = await getBoardSprintReportsSince(
+    team.rapidViewId,
+    SINCE_ISO,
+    cached,
+  );
+  const built = buildReport(team, sprints, failed);
+  memCache.set(team.rapidViewId, built);
+  await writeSprintCache(fetched);
+  return built;
+}
+
+/** Все ли нужные отчёты уже в памяти страницы — тогда показываем без сети и без мигания. */
+function inMemory(list: readonly TeamBoard[]): boolean {
+  return list.every((t) => memCache.has(t.rapidViewId));
+}
+
+/** Загрузить текущий вид: сводку дивизиона или одну команду. force=true минует кеши. */
+async function load(force = false) {
+  const v = view.value;
+  const list =
+    v === 'division' ? currentTeams.value : currentTeams.value.filter((t) => t.rapidViewId === v);
+  error.value = null;
+  if (list.length === 0) {
+    report.value = null;
+    division.value = null;
+    loading.value = false;
+    return;
   }
 
-  loading.value = true;
-  error.value = null;
+  const fromMemory = !force && inMemory(list);
+  if (!fromMemory) loading.value = true;
   try {
-    // Два пути в Jira. Токен — основной (работает всегда). Без токена идём через ОТКРЫТУЮ
-    // вкладку Jira: там живут cookie сессии SSO, и запросы делает content-script.
-    const creds = await jiraCreds.getValue();
-    if (creds) {
-      setJiraAuth({ baseUrl: creds.baseUrl, email: creds.email, apiToken: creds.apiToken });
-      setJiraTabTransport(null);
-      usingTab.value = false;
-    } else {
-      // Ждём ГОТОВНОСТИ вкладки, а не просто её наличия: Jira SPA поднимает content-script
-      // секунды, и без ожидания первый же запрос падал бы — пользователь видел бы ошибку
-      // вместо данных. Цикл живёт здесь: страница не выгружается, в отличие от MV3-воркера.
-      waitingTab.value = true;
-      const { ready, present } = await waitJiraTabReady();
-      waitingTab.value = false;
-      if (!ready) {
-        error.value = present
-          ? 'Вкладка Jira ещё не загрузилась. Дождитесь, пока откроется доска, и нажмите «Повторить».'
-          : 'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
-            'либо укажите email и API-токен в настройках расширения.';
-        return;
-      }
-      setJiraAuth(null);
-      setJiraTabTransport((path) => sendMessage('jiraFetch', { path }));
-      usingTab.value = true;
+    if (!fromMemory && !(await ensureAccess())) return;
+
+    // Команды — ПОСЛЕДОВАТЕЛЬНО: у каждой свой пул запросов, а параллельно три пула
+    // пробили бы лимит Jira (rate limit считается на весь тенант). «Обновить» у дивизиона
+    // перечитывает только списки спринтов: полная перезагрузка всех команд — это десятки
+    // запросов разом, а закрытые спринты не меняются. Полная — на вкладке команды.
+    const fresh = !force ? 'none' : v === 'division' ? 'list' : 'all';
+    const reports: TeamReport[] = [];
+    for (const [i, t] of list.entries()) {
+      if (list.length > 1) progress.value = `${t.name} (${i + 1} из ${list.length})`;
+      reports.push(await loadTeam(t, fresh));
     }
+    if (v !== view.value) return; // пока грузили, пользователь переключил вкладку
 
-    // 2) Отдаём загрузчику всё, что уже есть — он дотянет только недостающее.
-    const cached = force ? new Map<number, SprintReportDetail>() : await readSprintCache();
-    const { sprints, failed, fetched } = await getBoardSprintReportsSince(rvid, SINCE_ISO, cached);
-
-    const built = buildReport(rvid, sprints, failed);
-    memCache.set(rvid, built);
-    await writeSprintCache(fetched);
-    applyReport(built);
+    if (v === 'division') {
+      division.value = {
+        quarters: divisionQuarters(
+          reports.map((r) => ({ rapidViewId: r.rapidViewId, team: r.team, sprints: r.sprints })),
+        ),
+        failed: reports.reduce((s, r) => s + r.failed, 0),
+      };
+    } else {
+      applyReport(reports[0]);
+    }
   } catch (e) {
     error.value = errorText(e);
   } finally {
+    progress.value = null;
     loading.value = false;
   }
 }
@@ -298,29 +394,87 @@ function errorText(e: unknown): string {
   return `Ошибка загрузки: ${String(e)}`;
 }
 
-/** Кнопка «Обновить» — форсированная перезагрузка текущей команды из сети. */
+/** Кнопка «Обновить» — форсированная перезагрузка текущего вида из сети. */
 function refresh() {
-  memCache.delete(selectedRvid.value);
   void load(true);
 }
 
-/** Выбор команды в сегментированном контроле → загрузка отчёта (из кеша мгновенно или сеть). */
-function selectTeam(rvid: number) {
-  if (loading.value || rvid === selectedRvid.value) return;
-  selectedRvid.value = rvid;
+/** Выбор и адрес запоминаем в hash — ссылку на вид дивизиона/команды можно переслать. */
+function writeHash() {
+  const team = view.value === 'division' ? '' : `&team=${view.value}`;
+  history.replaceState(
+    null,
+    '',
+    `#division=${encodeURIComponent(selectedDivisionId.value)}${team}`,
+  );
+}
+
+function selectView(v: 'division' | number) {
+  if (loading.value || v === view.value) return;
+  view.value = v;
+  writeHash();
+  void load();
+}
+
+function selectDivision(id: string) {
+  if (loading.value || id === selectedDivisionId.value) return;
+  selectedDivisionId.value = id;
+  view.value = 'division';
+  writeHash();
   void load();
 }
 
 onMounted(async () => {
   // Пороги нужны ДО первого buildReport — иначе правила не посчитаются.
   thresholds.value = toThresholds(await sprintHealthThresholds.getValue());
-  // Дефолтная команда — из настроек доски (boardConfig), если она есть среди TEAM_BOARDS.
-  const cfg = await boardConfig.getValue();
-  if (TEAM_BOARDS.some((b) => b.rapidViewId === cfg.rapidViewId)) {
-    selectedRvid.value = cfg.rapidViewId;
-  }
+  teamList.value = await teams.getValue();
+  divisionList.value = await divisions.getValue();
+  target.value = await quarterTarget.getValue();
+
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const wanted = divisionOptions.value.find((d) => d.id === hash.get('division'));
+  selectedDivisionId.value = (wanted ?? divisionOptions.value[0])?.id ?? '';
+  const teamId = Number(hash.get('team'));
+  if (currentTeams.value.some((t) => t.rapidViewId === teamId)) view.value = teamId;
   await load();
 });
+
+/**
+ * Настройки команд/дивизионов поменяли в соседней вкладке — перестраиваем вид без перезагрузки
+ * страницы. Сеть почти не трогаем: отчёты команд уже в памяти и в кеше спринтов.
+ */
+async function onTeamsChanged() {
+  teamList.value = await teams.getValue();
+  divisionList.value = await divisions.getValue();
+  if (!divisionOptions.value.some((d) => d.id === selectedDivisionId.value)) {
+    selectedDivisionId.value = divisionOptions.value[0]?.id ?? '';
+  }
+  if (view.value !== 'division' && !currentTeams.value.some((t) => t.rapidViewId === view.value)) {
+    view.value = 'division';
+  }
+  writeHash();
+  if (!loading.value) void load();
+}
+teams.watch(() => void onTeamsChanged());
+divisions.watch(() => void onTeamsChanged());
+quarterTarget.watch((v) => (target.value = v));
+
+// --- Сводка дивизиона ---
+
+/** Идёт ли квартал сейчас — у текущего в сводке только закрытые спринты, цифры будут расти. */
+const currentQuarter = quarterOf(new Date().toISOString());
+
+/** Product-доля квартала против цели из настроек: в коридоре или нет. */
+function productStatus(b: CapBreakdown): { pct: number; delta: number; ok: boolean } {
+  const pct = b.shares.find((s) => s.slice === 'Product')?.pct ?? 0;
+  const delta = +(pct - target.value.productPct).toFixed(1);
+  return { pct, delta, ok: Math.abs(delta) <= target.value.bandPp };
+}
+
+/** Доля команды в закрытом объёме дивизиона за квартал, %. */
+function shareOf(q: DivisionQuarter, sp: number): number {
+  return q.completedSp > 0 ? Math.round((sp / q.completedSp) * 100) : 0;
+}
 
 /** Активное правило на КАЖДЫЙ спринт: sprintId → правило (или отсутствует = не выбрано). */
 const ruleFilter = ref<Map<number, RuleId>>(new Map());
@@ -506,6 +660,11 @@ const RULE_LABEL: Record<RuleId, string> = {
 
 const totalSprints = computed(() => report.value?.sprintCount ?? 0);
 
+/** Сколько спринтов не догрузилось в текущем виде — для плашки о неполных данных. */
+const failedCount = computed(() =>
+  view.value === 'division' ? (division.value?.failed ?? 0) : (report.value?.failed ?? 0),
+);
+
 /** Человекочитаемое имя квартала: "2025-Q2" → "Q2 2025". */
 function quarterLabel(q: string): string {
   const [year, quarter] = q.split('-');
@@ -574,7 +733,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
         <div class="flex-1">
           <h1 class="text-lg font-semibold">Отчёт по спринтам</h1>
           <p class="text-sm text-slate-500 dark:text-slate-400">
-            Спринты с 2025 года по кварталам · распределение capacity по CAP-бакетам · velocity.
+            Спринты с Q4 2025 по кварталам · сводка дивизиона и команд · CAP-микс · velocity.
           </p>
         </div>
         <button
@@ -586,37 +745,60 @@ const CAP_SLICES_ALL = CAP_SLICES;
         </button>
       </header>
 
-      <!-- Выбор команды: сегментированный контрол (ADS-стиль, как табы Jira) -->
-      <div class="mb-6 flex items-center gap-3">
-        <span class="text-xs font-medium uppercase tracking-wide text-slate-400">Команда</span>
+      <!-- Выбор дивизиона и вкладки: сводка дивизиона + команды (ADS-стиль, как табы Jira) -->
+      <div class="mb-6 flex flex-wrap items-center gap-3">
+        <label class="flex items-center gap-2">
+          <span class="text-xs font-medium uppercase tracking-wide text-slate-400">Дивизион</span>
+          <select
+            :value="selectedDivisionId"
+            :disabled="loading || divisionOptions.length < 2"
+            class="rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm font-medium outline-none focus:border-indigo-500 disabled:opacity-100 dark:border-slate-700 dark:bg-slate-900"
+            @change="selectDivision(($event.target as HTMLSelectElement).value)"
+          >
+            <option v-for="d in divisionOptions" :key="d.id" :value="d.id">{{ d.name }}</option>
+          </select>
+        </label>
         <div
+          v-if="currentTeams.length"
           role="tablist"
-          aria-label="Выбор команды"
-          class="inline-flex gap-0.5 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800/80"
+          aria-label="Сводка дивизиона или команда"
+          class="inline-flex flex-wrap gap-0.5 rounded-lg bg-slate-100 p-0.5 dark:bg-slate-800/80"
         >
           <button
-            v-for="b in TEAM_BOARDS"
-            :key="b.rapidViewId"
+            v-for="tab in [
+              { id: 'division' as const, label: 'Весь дивизион' },
+              ...currentTeams.map((t) => ({ id: t.rapidViewId, label: t.name })),
+            ]"
+            :key="tab.id"
             type="button"
             role="tab"
-            :aria-selected="selectedRvid === b.rapidViewId"
+            :aria-selected="view === tab.id"
             :disabled="loading"
             class="rounded-md px-3.5 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60"
             :class="
-              selectedRvid === b.rapidViewId
+              view === tab.id
                 ? 'bg-white text-slate-900 shadow-sm dark:bg-slate-950 dark:text-white'
                 : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
             "
-            @click="selectTeam(b.rapidViewId)"
+            @click="selectView(tab.id)"
           >
-            {{ b.team }}
+            {{ tab.label }}
           </button>
         </div>
+        <a
+          href="/options.html"
+          target="_blank"
+          class="ml-auto text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+        >
+          Настроить команды и дивизионы
+        </a>
       </div>
 
       <!-- Общая легенда бакетов -->
       <div
-        v-if="!loading && !error && totalSprints"
+        v-if="
+          !loading && !error && (view === 'division' ? division?.quarters.length : totalSprints)
+        "
         class="mb-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400"
       >
         <span v-for="slice in CAP_SLICES_ALL" :key="slice" class="inline-flex items-center gap-1.5">
@@ -640,12 +822,12 @@ const CAP_SLICES_ALL = CAP_SLICES;
 
       <!-- Плашка частичных данных: часть спринтов не догрузилась (rate-limit/сеть) -->
       <div
-        v-if="!loading && !error && report && report.failed > 0"
+        v-if="!loading && !error && failedCount > 0"
         class="mb-4 flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
       >
         <span class="flex-1">
-          Загружены не все спринты: {{ report.failed }}
-          {{ report.failed === 1 ? 'спринт не удалось' : 'спринтов не удалось' }} получить
+          Загружены не все спринты: {{ failedCount }}
+          {{ failedCount === 1 ? 'спринт не удалось' : 'спринтов не удалось' }} получить
           (ограничение частоты запросов Jira). Квартальные цифры могут быть неполными.
         </span>
         <button
@@ -679,8 +861,182 @@ const CAP_SLICES_ALL = CAP_SLICES;
           Ждём загрузки вкладки Jira — через неё идут запросы, пока не задан API-токен…
         </template>
         <template v-else>
-          Загружаем отчёты по спринтам… (все закрытые спринты команды с 2025 года)
+          Загружаем отчёты по спринтам…
+          <template v-if="progress">{{ progress }}</template>
+          <template v-else>(все закрытые спринты с Q4 2025)</template>
         </template>
+      </div>
+
+      <!-- Нет команд: всё выключено или дивизион пуст -->
+      <div v-else-if="!currentTeams.length" class="py-16 text-center text-sm text-slate-400">
+        В дивизионе нет включённых команд. Добавьте их в
+        <a
+          href="/options.html"
+          target="_blank"
+          class="text-indigo-600 hover:underline dark:text-indigo-400"
+        >
+          настройках</a
+        >.
+      </div>
+
+      <!-- Сводка дивизиона: кварталы, в каждом итог и строка на команду -->
+      <div v-else-if="view === 'division'" class="space-y-4">
+        <div v-if="!division?.quarters.length" class="py-16 text-center text-sm text-slate-400">
+          Нет закрытых спринтов с Q4 2025 у команд дивизиона.
+        </div>
+        <section
+          v-for="q in division?.quarters ?? []"
+          :key="q.quarter"
+          class="overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
+        >
+          <div class="px-4 pb-3 pt-3">
+            <div class="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h2 class="text-base font-semibold">{{ quarterLabel(q.quarter) }}</h2>
+              <span
+                v-if="q.quarter === currentQuarter"
+                class="rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                title="Квартал ещё идёт: учтены только закрытые спринты"
+              >
+                идёт
+              </span>
+              <span class="text-xs text-slate-500 dark:text-slate-400">
+                {{ q.sprintCount }} спр. ·
+                <b class="text-slate-700 dark:text-slate-200">{{ fmtNum(q.completedSp) }} SP</b>
+                закрыто
+              </span>
+              <span
+                class="ml-auto text-xs font-medium"
+                :class="
+                  productStatus(q.breakdown).ok
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-amber-700 dark:text-amber-400'
+                "
+                :title="`Цель Product ${target.productPct}% ±${target.bandPp} пп (настраивается в «Квартальный баланс»)`"
+              >
+                Product {{ productStatus(q.breakdown).pct }}%
+                <template v-if="productStatus(q.breakdown).ok">· в цели</template>
+                <template v-else>
+                  · {{ productStatus(q.breakdown).delta > 0 ? '+' : ''
+                  }}{{ productStatus(q.breakdown).delta }} пп от цели {{ target.productPct }}%
+                </template>
+              </span>
+            </div>
+
+            <!-- CAP-микс дивизиона + метка цели Product -->
+            <div class="relative">
+              <div class="flex h-3 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
+                <div
+                  v-for="sh in nonEmpty(q.breakdown)"
+                  :key="sh.slice"
+                  class="h-full"
+                  :style="{ width: sh.pct + '%', background: sliceColor(sh.slice) }"
+                  :title="`${SLICE_LABEL[sh.slice]}: ${fmtNum(sh.points)} SP (${sh.pct}%)`"
+                />
+              </div>
+              <div
+                class="absolute -bottom-0.5 -top-0.5 w-0.5 bg-slate-800 dark:bg-slate-100"
+                :style="{ left: `calc(${target.productPct}% - 1px)` }"
+                :title="`Цель Product: ${target.productPct}%`"
+              />
+            </div>
+            <div
+              class="mt-2 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400"
+            >
+              <span
+                v-for="sh in nonEmpty(q.breakdown)"
+                :key="sh.slice"
+                class="inline-flex items-center gap-1"
+              >
+                <span
+                  class="inline-block size-2 rounded-sm"
+                  :style="{ background: sliceColor(sh.slice) }"
+                />
+                {{ SLICE_LABEL[sh.slice] }} {{ sh.pct }}%
+                <span class="text-slate-400">({{ fmtNum(sh.points) }})</span>
+              </span>
+            </div>
+          </div>
+
+          <!-- Вклад команд -->
+          <table class="w-full text-sm">
+            <thead>
+              <tr
+                class="border-t border-slate-100 text-left font-mono text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-800"
+              >
+                <th class="py-2 pl-4 pr-2 font-normal">Команда</th>
+                <th class="px-2 py-2 text-right font-normal">Спр.</th>
+                <th class="px-2 py-2 text-right font-normal">SP</th>
+                <th
+                  class="px-2 py-2 text-right font-normal"
+                  title="Доля команды в закрытом объёме дивизиона"
+                >
+                  Доля
+                </th>
+                <th class="px-2 py-2 text-right font-normal" title="Среднее закрытое за спринт">
+                  SP/спр.
+                </th>
+                <th class="w-2/5 py-2 pl-2 pr-4 font-normal">CAP-микс</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="t in q.teams"
+                :key="t.rapidViewId"
+                class="border-t border-slate-50 dark:border-slate-800/50"
+              >
+                <td class="py-2 pl-4 pr-2">
+                  <button
+                    type="button"
+                    class="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                    :title="`Открыть отчёт команды ${t.team}`"
+                    @click="selectView(t.rapidViewId)"
+                  >
+                    {{ t.team }}
+                  </button>
+                </td>
+                <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+                  {{ t.sprintCount }}
+                </td>
+                <td class="px-2 py-2 text-right font-medium tabular-nums">
+                  {{ fmtNum(t.completedSp) }}
+                </td>
+                <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+                  {{ shareOf(q, t.completedSp) }}%
+                </td>
+                <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
+                  {{ t.spPerSprint === null ? '—' : fmtNum(t.spPerSprint) }}
+                </td>
+                <td class="py-2 pl-2 pr-4">
+                  <div v-if="t.breakdown.totalPoints > 0" class="flex items-center gap-2">
+                    <span
+                      class="flex h-2 flex-1 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
+                    >
+                      <span
+                        v-for="sh in nonEmpty(t.breakdown)"
+                        :key="sh.slice"
+                        class="h-full"
+                        :style="{ width: sh.pct + '%', background: sliceColor(sh.slice) }"
+                        :title="`${SLICE_LABEL[sh.slice]}: ${fmtNum(sh.points)} SP (${sh.pct}%)`"
+                      />
+                    </span>
+                    <span
+                      class="w-20 shrink-0 text-right text-[11px] tabular-nums"
+                      :class="
+                        productStatus(t.breakdown).ok
+                          ? 'text-slate-500 dark:text-slate-400'
+                          : 'text-amber-700 dark:text-amber-400'
+                      "
+                      :title="`Доля Product у команды; цель ${target.productPct}% ±${target.bandPp} пп`"
+                    >
+                      Product {{ productStatus(t.breakdown).pct }}%
+                    </span>
+                  </div>
+                  <span v-else class="text-[11px] text-slate-400">нет закрытых спринтов</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
       </div>
 
       <!-- Пусто -->
@@ -688,7 +1044,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
         v-else-if="!report || totalSprints === 0"
         class="py-16 text-center text-sm text-slate-400"
       >
-        Нет закрытых спринтов с 2025 года для выбранной команды.
+        Нет закрытых спринтов с Q4 2025 у этой команды.
       </div>
 
       <!-- Отчёт выбранной команды -->
@@ -1030,7 +1386,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         >
                           <div class="flex items-baseline gap-2">
                             <a
-                              :href="`https://tvbet.atlassian.net/browse/${e.key}`"
+                              :href="`${jiraBase}/browse/${e.key}`"
                               target="_blank"
                               rel="noopener"
                               class="font-mono text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
@@ -1087,7 +1443,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           <td class="py-2 pl-11 pr-2">
                             <div class="flex items-center gap-2">
                               <a
-                                :href="`https://tvbet.atlassian.net/browse/${issue.key}`"
+                                :href="`${jiraBase}/browse/${issue.key}`"
                                 target="_blank"
                                 rel="noopener"
                                 class="font-mono text-xs text-indigo-600 hover:underline dark:text-indigo-400"

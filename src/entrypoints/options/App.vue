@@ -8,10 +8,19 @@ import {
   statusConfig,
   jiraCreds,
   sprintHealthThresholds,
+  teams,
+  divisions,
   type QuarterUiMode,
   type SprintHealthThresholds,
 } from '@/shared/storage';
-import type { CapTargets } from '@/core/domain';
+import {
+  DEFAULT_TEAMS,
+  newDivisionId,
+  parseBoardRef,
+  type CapTargets,
+  type Division,
+  type TeamBoard,
+} from '@/core/domain';
 
 const targets = ref<CapTargets>({ Product: 67, Tech: 16.5, Support: 16.5 });
 const historyN = ref(6);
@@ -26,6 +35,90 @@ const jiraBaseUrl = ref('https://tvbet.atlassian.net');
 const jiraEmail = ref('');
 const jiraToken = ref('');
 const saved = ref(false);
+
+// --- Команды и дивизионы (отчёт по спринтам) ---
+const teamList = ref<TeamBoard[]>([]);
+const divisionList = ref<Division[]>([]);
+const newBoard = ref('');
+const newTeamName = ref('');
+const newTeamDivision = ref('');
+const teamError = ref<string | null>(null);
+const newDivisionName = ref('');
+
+/**
+ * Добавить команду по ссылке на доску (или номеру). Имя по умолчанию — ключ проекта из ссылки.
+ * Команда сразу попадает в выбранный дивизион — иначе её пришлось бы искать в «Другие команды».
+ */
+function addTeam() {
+  teamError.value = null;
+  const board = parseBoardRef(newBoard.value);
+  if (!board) {
+    teamError.value =
+      'Не нашёл номер доски. Вставьте ссылку вида …/projects/CORE/boards/20 или просто номер доски.';
+    return;
+  }
+  const existing = teamList.value.find((t) => t.rapidViewId === board.rapidViewId);
+  if (existing) {
+    teamError.value = `Доска ${board.rapidViewId} уже добавлена как «${existing.name}».`;
+    return;
+  }
+  const name = newTeamName.value.trim() || board.projectKey || `Доска ${board.rapidViewId}`;
+  teamList.value.push({
+    rapidViewId: board.rapidViewId,
+    name,
+    enabled: true,
+    projectKey: board.projectKey,
+  });
+  const div = divisionList.value.find((d) => d.id === newTeamDivision.value);
+  if (div) div.teamIds.push(board.rapidViewId);
+  newBoard.value = '';
+  newTeamName.value = '';
+}
+
+function removeTeam(rapidViewId: number) {
+  teamList.value = teamList.value.filter((t) => t.rapidViewId !== rapidViewId);
+  for (const d of divisionList.value) d.teamIds = d.teamIds.filter((id) => id !== rapidViewId);
+}
+
+/** Вернуть стандартные команды (El Casino / POC / Web), не трогая добавленные пользователем. */
+function restoreDefaultTeams() {
+  for (const def of DEFAULT_TEAMS) {
+    const cur = teamList.value.find((t) => t.rapidViewId === def.rapidViewId);
+    if (cur) cur.enabled = true;
+    else teamList.value.push({ ...def });
+  }
+}
+const missingDefaults = computed(() =>
+  DEFAULT_TEAMS.some((d) => {
+    const cur = teamList.value.find((t) => t.rapidViewId === d.rapidViewId);
+    return !cur || !cur.enabled;
+  }),
+);
+
+function toggleDivisionTeam(d: Division, rapidViewId: number, on: boolean) {
+  d.teamIds = on
+    ? [...new Set([...d.teamIds, rapidViewId])]
+    : d.teamIds.filter((id) => id !== rapidViewId);
+}
+
+function addDivision() {
+  const name = newDivisionName.value.trim();
+  if (!name) return;
+  divisionList.value.push({ id: newDivisionId(name, divisionList.value), name, teamIds: [] });
+  newDivisionName.value = '';
+}
+
+function removeDivision(id: string) {
+  divisionList.value = divisionList.value.filter((d) => d.id !== id);
+  if (newTeamDivision.value === id) newTeamDivision.value = divisionList.value[0]?.id ?? '';
+}
+
+/** Без имени команду/дивизион в отчёте не узнать — такие не сохраняем. */
+const namesValid = computed(
+  () =>
+    teamList.value.every((t) => t.name.trim()) && divisionList.value.every((d) => d.name.trim()),
+);
+const canSave = computed(() => sumValid.value && namesValid.value);
 
 /**
  * Пороги правил «здоровья спринта». Настраиваются, а не захардкожены: это командная
@@ -121,10 +214,22 @@ onMounted(async () => {
     jiraToken.value = creds.apiToken;
   }
   health.value = await sprintHealthThresholds.getValue();
+  teamList.value = await teams.getValue();
+  divisionList.value = await divisions.getValue();
+  newTeamDivision.value = divisionList.value[0]?.id ?? '';
 });
 
 async function save() {
-  if (!sumValid.value) return;
+  if (!canSave.value) return;
+  const teamIds = new Set(teamList.value.map((t) => t.rapidViewId));
+  await teams.setValue(teamList.value.map((t) => ({ ...t, name: t.name.trim() })));
+  await divisions.setValue(
+    divisionList.value.map((d) => ({
+      ...d,
+      name: d.name.trim(),
+      teamIds: d.teamIds.filter((id) => teamIds.has(id)),
+    })),
+  );
   await capTargets.setValue(targets.value);
   await sprintHistoryCount.setValue(Math.max(1, Math.round(historyN.value)));
   await quarterTarget.setValue({ productPct: qProduct.value, bandPp: qBand.value });
@@ -175,6 +280,174 @@ async function save() {
         @submit.prevent="save"
       >
         <div>
+          <h2 class="text-sm font-semibold">Команды</h2>
+          <p class="mt-1 text-xs text-slate-400">
+            Доски, которые попадают в «Отчёт по спринтам». Снимите галочку, чтобы исключить команду
+            из отчёта и сводок, не удаляя её.
+          </p>
+        </div>
+
+        <ul
+          class="divide-y divide-slate-100 rounded-md border border-slate-200 dark:divide-slate-800 dark:border-slate-800"
+        >
+          <li v-for="t in teamList" :key="t.rapidViewId" class="flex items-center gap-2 px-3 py-2">
+            <input
+              v-model="t.enabled"
+              type="checkbox"
+              class="size-4 accent-indigo-600"
+              :title="t.enabled ? 'Исключить из отчёта' : 'Включить в отчёт'"
+            />
+            <input
+              v-model="t.name"
+              type="text"
+              aria-label="Название команды"
+              class="min-w-0 flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              :class="t.enabled ? '' : 'text-slate-400'"
+            />
+            <span class="shrink-0 font-mono text-[11px] text-slate-400">
+              {{ t.projectKey ? t.projectKey + ' · ' : '' }}доска {{ t.rapidViewId }}
+            </span>
+            <button
+              type="button"
+              class="shrink-0 rounded px-1.5 text-slate-400 hover:bg-slate-100 hover:text-red-600 dark:hover:bg-slate-800"
+              :title="`Удалить «${t.name}»`"
+              @click="removeTeam(t.rapidViewId)"
+            >
+              ✕
+            </button>
+          </li>
+          <li v-if="!teamList.length" class="px-3 py-3 text-xs text-slate-400">Команд нет.</li>
+        </ul>
+        <button
+          v-if="missingDefaults"
+          type="button"
+          class="text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+          @click="restoreDefaultTeams"
+        >
+          Вернуть El Casino, POC и Web
+        </button>
+
+        <div class="rounded-md bg-slate-50 p-3 dark:bg-slate-800/50">
+          <span class="mb-2 block text-xs font-medium">Добавить команду</span>
+          <div class="grid gap-2 sm:grid-cols-[1fr_10rem]">
+            <input
+              v-model="newBoard"
+              type="text"
+              placeholder="https://tvbet.atlassian.net/jira/software/c/projects/CORE/boards/20"
+              aria-label="Ссылка на доску или её номер"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              @keydown.enter.prevent="addTeam"
+            />
+            <input
+              v-model="newTeamName"
+              type="text"
+              placeholder="Название (необязательно)"
+              aria-label="Название команды"
+              class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              @keydown.enter.prevent="addTeam"
+            />
+          </div>
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            <label
+              v-if="divisionList.length"
+              class="flex items-center gap-2 text-xs text-slate-500"
+            >
+              в дивизион
+              <select
+                v-model="newTeamDivision"
+                class="rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              >
+                <option v-for="d in divisionList" :key="d.id" :value="d.id">{{ d.name }}</option>
+                <option value="">— без дивизиона —</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              class="ml-auto rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+              @click="addTeam"
+            >
+              Добавить
+            </button>
+          </div>
+          <p v-if="teamError" class="mt-2 text-xs text-red-500">{{ teamError }}</p>
+          <p v-else class="mt-2 text-xs text-slate-400">
+            Ссылка на доску из адресной строки Jira или просто номер доски. Если название не
+            указать, возьмём ключ проекта из ссылки.
+          </p>
+        </div>
+
+        <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
+          <h2 class="text-sm font-semibold">Дивизионы</h2>
+          <p class="mt-1 text-xs text-slate-400">
+            Группы команд для общей квартальной сводки в отчёте («Весь дивизион»). Команда может
+            входить в несколько дивизионов.
+          </p>
+        </div>
+
+        <div
+          v-for="d in divisionList"
+          :key="d.id"
+          class="rounded-md border border-slate-200 p-3 dark:border-slate-800"
+        >
+          <div class="flex items-center gap-2">
+            <input
+              v-model="d.name"
+              type="text"
+              aria-label="Название дивизиона"
+              class="min-w-0 flex-1 font-medium rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            />
+            <button
+              type="button"
+              class="shrink-0 rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-red-600 dark:hover:bg-slate-800"
+              @click="removeDivision(d.id)"
+            >
+              Удалить
+            </button>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+            <label
+              v-for="t in teamList"
+              :key="t.rapidViewId"
+              class="inline-flex items-center gap-1.5 text-sm"
+              :class="t.enabled ? '' : 'text-slate-400'"
+              :title="t.enabled ? '' : 'Команда исключена из отчёта — в сводку не попадёт'"
+            >
+              <input
+                type="checkbox"
+                class="size-4 accent-indigo-600"
+                :checked="d.teamIds.includes(t.rapidViewId)"
+                @change="
+                  toggleDivisionTeam(d, t.rapidViewId, ($event.target as HTMLInputElement).checked)
+                "
+              />
+              {{ t.name || 'без имени' }}
+            </label>
+            <span v-if="!teamList.length" class="text-xs text-slate-400"
+              >Сначала добавьте команды.</span
+            >
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <input
+            v-model="newDivisionName"
+            type="text"
+            placeholder="Название нового дивизиона"
+            aria-label="Название нового дивизиона"
+            class="min-w-0 flex-1 rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+            @keydown.enter.prevent="addDivision"
+          />
+          <button
+            type="button"
+            :disabled="!newDivisionName.trim()"
+            class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:hover:bg-slate-800"
+            @click="addDivision"
+          >
+            Создать дивизион
+          </button>
+        </div>
+
+        <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="text-sm font-semibold">Целевое распределение capacity (%)</h2>
           <p class="mt-1 text-xs text-slate-400">Сумма должна равняться 100%.</p>
         </div>
@@ -390,12 +663,15 @@ async function save() {
         <div class="flex items-center gap-3 pt-1">
           <button
             type="submit"
-            :disabled="!sumValid"
+            :disabled="!canSave"
             class="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
           >
             Сохранить
           </button>
           <span v-if="saved" class="text-sm text-green-600">Сохранено ✓</span>
+          <span v-else-if="!namesValid" class="text-sm text-red-500">
+            У каждой команды и дивизиона должно быть имя
+          </span>
         </div>
       </form>
     </div>
