@@ -18,12 +18,7 @@ import type {
   GhIssueChangelogDto,
   GhSprintReportDto,
 } from './dto';
-import {
-  currentConcurrency,
-  jiraGetJson,
-  jiraGetJsonRetry,
-  mapWithConcurrency,
-} from './client';
+import { currentConcurrency, jiraGetJson, jiraGetJsonRetry, mapWithConcurrency } from './client';
 import { endpoints } from './endpoints';
 import {
   mapIssue,
@@ -52,7 +47,9 @@ export async function fetchClosedSprints(rapidViewId: number): Promise<AgileSpri
       endpoints.boardSprints(rapidViewId, startAt),
     );
     const values = page.values ?? [];
-    out.push(...values.filter((s) => s.originBoardId === undefined || s.originBoardId === rapidViewId));
+    out.push(
+      ...values.filter((s) => s.originBoardId === undefined || s.originBoardId === rapidViewId),
+    );
     if (page.isLast || values.length === 0) break;
     startAt += values.length;
   }
@@ -290,6 +287,7 @@ export async function getBoardSprintReportsSince(
   rapidViewId: number,
   sinceIso: string,
   cached: ReadonlyMap<number, SprintReportDetail> = new Map(),
+  refetch = false,
 ): Promise<SprintReportsResult> {
   const since = Date.parse(sinceIso);
 
@@ -299,8 +297,10 @@ export async function getBoardSprintReportsSince(
     return !Number.isNaN(t) && t >= since;
   });
 
-  // 2) Отчёты закрытых спринтов неизменны → тянем только те, которых нет в кеше.
-  const missing = wanted.filter((s) => !cached.has(s.id));
+  // 2) Обычно тянем только спринты, которых нет в кеше. refetch — все: метки и оценки задач
+  //    правят и после закрытия спринта, а отчёт отдаёт их текущие значения. Кеш при этом
+  //    остаётся запасным вариантом — спринт, не догрузившийся из-за лимита, не пропадёт.
+  const missing = refetch ? wanted : wanted.filter((s) => !cached.has(s.id));
 
   const settled = await mapWithConcurrency(missing, currentConcurrency(), (sprint) =>
     jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),

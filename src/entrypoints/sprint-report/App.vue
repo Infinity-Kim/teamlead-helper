@@ -223,7 +223,10 @@ function applyReport(r: TeamReport) {
   ruleFilter.value = new Map();
 }
 
-/** Отчёты закрытых спринтов из persist-кеша. Без TTL: закрытый спринт неизменен. */
+/**
+ * Отчёты закрытых спринтов из persist-кеша. Без TTL: состав спринта после закрытия не меняется,
+ * а метки/оценки, поправленные позже, подтягивает кнопка «Обновить».
+ */
 async function readSprintCache(): Promise<Map<number, SprintReportDetail>> {
   const cache = await sprintReportCache.getValue();
   const out = new Map<number, SprintReportDetail>();
@@ -306,17 +309,17 @@ async function ensureAccess(): Promise<boolean> {
 /**
  * Отчёт одной команды. Отчёты закрытых спринтов кешируются БЕССРОЧНО по sprintId, поэтому
  * сеть трогается только для новых спринтов: первое открытие ~14 запросов, дальше — 2 + 0–1.
- * fresh: 'list' — перечитать список спринтов (новые закрытые), 'all' — ещё и все отчёты.
+ * fresh — перезапросить все отчёты (кнопка «Обновить»): метки и оценки правят и после
+ * закрытия спринта. Кеш и тогда передаётся — как запасной вариант при сбое запроса.
  */
-async function loadTeam(team: TeamBoard, fresh: 'none' | 'list' | 'all'): Promise<TeamReport> {
-  const mem = fresh === 'none' ? memCache.get(team.rapidViewId) : undefined;
+async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
+  const mem = fresh ? undefined : memCache.get(team.rapidViewId);
   if (mem) return mem;
-  // Отдаём загрузчику всё, что уже есть — он дотянет только недостающее.
-  const cached = fresh === 'all' ? new Map<number, SprintReportDetail>() : await readSprintCache();
   const { sprints, failed, fetched } = await getBoardSprintReportsSince(
     team.rapidViewId,
     SINCE_ISO,
-    cached,
+    await readSprintCache(),
+    fresh,
   );
   const built = buildReport(team, sprints, failed);
   memCache.set(team.rapidViewId, built);
@@ -348,14 +351,11 @@ async function load(force = false) {
     if (!fromMemory && !(await ensureAccess())) return;
 
     // Команды — ПОСЛЕДОВАТЕЛЬНО: у каждой свой пул запросов, а параллельно три пула
-    // пробили бы лимит Jira (rate limit считается на весь тенант). «Обновить» у дивизиона
-    // перечитывает только списки спринтов: полная перезагрузка всех команд — это десятки
-    // запросов разом, а закрытые спринты не меняются. Полная — на вкладке команды.
-    const fresh = !force ? 'none' : v === 'division' ? 'list' : 'all';
+    // пробили бы лимит Jira (rate limit считается на весь тенант).
     const reports: TeamReport[] = [];
     for (const [i, t] of list.entries()) {
       if (list.length > 1) progress.value = `${t.name} (${i + 1} из ${list.length})`;
-      reports.push(await loadTeam(t, fresh));
+      reports.push(await loadTeam(t, force));
     }
     if (v !== view.value) return; // пока грузили, пользователь переключил вкладку
 
