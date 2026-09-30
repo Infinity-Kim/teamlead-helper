@@ -650,3 +650,41 @@ export function healthVerdict(summaries: readonly RuleSummary[]): HealthVerdict 
     critical: focus?.level === 'crit',
   };
 }
+
+/**
+ * Цвета уровней здоровья: по одному основному цвету на уровень (#rrggbb). Фон чипа — заливка
+ * этим цветом с прозрачностью, рамка — сам цвет, текст нейтральный: так читается любой цвет,
+ * который выберет тимлид, и в светлой, и в тёмной теме.
+ *
+ * Дефолты — из палитры Atlassian Design System (@atlaskit/tokens, тема atlassian-light):
+ * НЕ семантический warning (он оранжевый: text #9E4C00, border #E06C00 — рядом с красным
+ * жёлтый уровень от него почти не отличался), а accent-жёлтый.
+ */
+export interface HealthColors {
+  /** В норме — accent-lime-subtle. */
+  ok: string;
+  /** За первым порогом — accent-yellow-subtle. */
+  warn: string;
+  /** За вторым порогом — accent-red-subtle. */
+  crit: string;
+}
+
+export const DEFAULT_HEALTH_COLORS: Readonly<HealthColors> = {
+  ok: '#94C748',
+  warn: '#EED12B',
+  crit: '#F87168',
+};
+
+const HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+/** Сохранённые цвета + дефолты вместо отсутствующих/битых значений. */
+export function withHealthColorDefaults(
+  saved: Partial<HealthColors> | null | undefined,
+): HealthColors {
+  const out: HealthColors = { ...DEFAULT_HEALTH_COLORS };
+  for (const key of Object.keys(out) as Array<keyof HealthColors>) {
+    const v = saved?.[key];
+    if (typeof v === 'string' && HEX_COLOR.test(v)) out[key] = v;
+  }
+  return out;
+}

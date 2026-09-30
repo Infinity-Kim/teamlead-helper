@@ -14,6 +14,7 @@ import {
   quarterTarget,
   sprintReportCache,
   sprintHealthThresholds,
+  sprintHealthColors,
   SPRINT_CACHE_LIMIT,
   type QuarterTargetConfig,
 } from '@/shared/storage';
@@ -35,6 +36,9 @@ import {
   healthSummary,
   healthVerdict,
   toThresholds,
+  withHealthColorDefaults,
+  DEFAULT_HEALTH_COLORS,
+  type HealthColors,
   divisionQuarters,
   completionRates,
   sprintCompletion,
@@ -52,6 +56,7 @@ import {
 } from '@/core/metrics';
 import { BUCKET_COLORS } from '@/components/ads-tokens';
 import HealthChips from '@/components/HealthChips.vue';
+import { levelStyle, type HealthLevel } from '@/components/health-tone';
 
 /**
  * Спринты берём со стартом от Q4 2025 — раньше CAP-метки в Jira не проставлялись
@@ -84,6 +89,8 @@ const memCache = new Map<number, TeamReport>();
 
 /** Пороги правил из настроек (читаются один раз при монтировании). */
 const thresholds = ref<HealthThresholds | null>(null);
+/** Цвета уровней здоровья из настроек (по умолчанию — палитра ADS). */
+const healthColors = ref<HealthColors>({ ...DEFAULT_HEALTH_COLORS });
 
 /** Данные идут через вкладку Jira (без токена) — показываем это пользователю. */
 const usingTab = ref(false);
@@ -431,6 +438,7 @@ function selectDivision(id: string) {
 onMounted(async () => {
   // Пороги нужны ДО первого buildReport — иначе правила не посчитаются.
   thresholds.value = toThresholds(await sprintHealthThresholds.getValue());
+  healthColors.value = withHealthColorDefaults(await sprintHealthColors.getValue());
   teamList.value = await teams.getValue();
   divisionList.value = await divisions.getValue();
   target.value = await quarterTarget.getValue();
@@ -467,6 +475,7 @@ quarterTarget.watch((v) => (target.value = v));
  * Пороги здоровья поменяли в настройках — пересчитываем правила уже загруженных отчётов.
  * Без сети: правила считаются из тех же спринтов, меняется только сравнение с порогами.
  */
+sprintHealthColors.watch((v) => (healthColors.value = withHealthColorDefaults(v)));
 sprintHealthThresholds.watch((v) => {
   const t = toThresholds(v);
   thresholds.value = t;
@@ -548,6 +557,11 @@ function activeEvidence(sid: number) {
   return res?.evidence?.issues.length ? { rule, result: res, ...res.evidence } : null;
 }
 
+/** Уровень правила для подсветки блока задач (правило без оценки сюда не попадает). */
+function evidenceLevel(r: RuleResult): HealthLevel {
+  return r.status === 'crit' || r.status === 'warn' ? r.status : 'ok';
+}
+
 /** «30% при порогах 20% / 30%» — значение правила против жёлтого и красного порога. */
 function evidenceLimits(r: RuleResult): string {
   if (r.rule === 'punted') {
@@ -613,12 +627,10 @@ function summaryLimits(rs: RuleSummary): string {
     : `${fmtPct(rs.threshold)} / ${fmtPct(rs.critThreshold)}`;
 }
 
-/** Цвет типичного значения в сводке — по тем же двум порогам, что и чипы спринтов. */
-const LEVEL_TEXT: Record<'ok' | 'warn' | 'crit', string> = {
-  ok: 'text-slate-800 dark:text-slate-100',
-  warn: 'text-amber-700 dark:text-amber-400',
-  crit: 'text-rose-700 dark:text-rose-400',
-};
+/** Стиль цвета уровня из настроек; fill — насыщенность заливки в %. */
+function toneOf(level: HealthLevel, fill?: number) {
+  return levelStyle(healthColors.value[level], fill);
+}
 
 /** Главный вывод по окну: что чинить, почему и что уже наладилось. */
 const verdict = computed(() => (report.value ? healthVerdict(report.value.healthSummary) : null));
@@ -1212,14 +1224,8 @@ const CAP_SLICES_ALL = CAP_SLICES;
           >
             <!-- Главный вывод словами -->
             <div
-              class="px-4 py-3"
-              :class="
-                verdict?.critical
-                  ? 'bg-rose-50/70 dark:bg-rose-950/20'
-                  : verdict?.focus
-                    ? 'bg-amber-50/70 dark:bg-amber-950/20'
-                    : 'bg-emerald-50/60 dark:bg-emerald-950/20'
-              "
+              class="border-l-4 px-4 py-3"
+              :style="toneOf(verdict?.critical ? 'crit' : verdict?.focus ? 'warn' : 'ok', 12)"
             >
               <p class="text-sm font-medium text-slate-800 dark:text-slate-100">
                 {{ verdictText.headline }}
@@ -1265,7 +1271,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 </span>
                 <template v-if="rs.evaluated > 0">
                   <span class="whitespace-nowrap">
-                    <b class="tabular-nums" :class="LEVEL_TEXT[rs.level ?? 'ok']">
+                    <b
+                      class="rounded border px-1 tabular-nums text-slate-800 dark:text-slate-100"
+                      :style="toneOf(rs.level ?? 'ok')"
+                    >
                       {{ summaryValue(rs) }}
                     </b>
                     <span class="text-slate-400"> / {{ summaryLimits(rs) }} </span>
@@ -1487,6 +1496,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                       <HealthChips
                         :results="healthOf(s.sprintId)"
                         :active="ruleFilter.get(s.sprintId) ?? null"
+                        :colors="healthColors"
                         @pick="(rule) => onRuleClick(s.sprintId, rule)"
                       />
                     </div>
@@ -1509,7 +1519,8 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     <!-- Задачи, на которых основано число выбранного правила — карточками -->
                     <div
                       v-if="activeEvidence(s.sprintId)"
-                      class="border-b border-amber-200 bg-amber-50/60 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/20"
+                      class="border-b px-4 py-3"
+                      :style="toneOf(evidenceLevel(activeEvidence(s.sprintId)!.result), 12)"
                     >
                       <div
                         class="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-slate-700 dark:text-slate-200"
@@ -1535,7 +1546,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         <li
                           v-for="e in evidenceCards(s)"
                           :key="e.key"
-                          class="rounded-md border border-amber-200/70 bg-white px-2.5 py-2 dark:border-amber-900/50 dark:bg-slate-900"
+                          class="rounded-md border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900"
                         >
                           <div class="flex items-baseline gap-2">
                             <a
@@ -1547,7 +1558,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                               {{ e.key }}
                             </a>
                             <span
-                              class="ml-auto whitespace-nowrap font-mono text-[11px] font-semibold tabular-nums text-amber-700 dark:text-amber-300"
+                              class="ml-auto whitespace-nowrap font-mono text-[11px] font-semibold tabular-nums text-slate-700 dark:text-slate-200"
                             >
                               {{ contribution(e) }}
                             </span>
