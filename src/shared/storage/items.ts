@@ -8,7 +8,12 @@ import {
   type SprintReportDetail,
   type TeamBoard,
 } from '@/core/domain';
-import { DEFAULT_HEALTH_SETTINGS, type HealthSettings } from '@/core/metrics';
+import {
+  DEFAULT_HEALTH_COLORS,
+  DEFAULT_HEALTH_SETTINGS,
+  type HealthColors,
+  type HealthSettings,
+} from '@/core/metrics';
 
 /**
  * Типобезопасный слой хранилища расширения — ЕДИНЫЙ источник истины для persisted-state.
@@ -170,3 +175,11 @@ export const sprintHealthThresholds = storage.defineItem<SprintHealthThresholds>
   'sync:sprintHealthThresholds',
   { fallback: { ...DEFAULT_HEALTH_SETTINGS } },
 );
+
+/**
+ * Цвета уровней здоровья спринта (зелёный / жёлтый / красный), настраиваются в options.
+ * Читать через `withHealthColorDefaults` — дополнит отсутствующие и отбросит битые значения.
+ */
+export const sprintHealthColors = storage.defineItem<HealthColors>('sync:sprintHealthColors', {
+  fallback: { ...DEFAULT_HEALTH_COLORS },
+});

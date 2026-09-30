@@ -13,6 +13,8 @@ import {
   normalizeHealthSettings,
   grade,
   DEFAULT_HEALTH_SETTINGS,
+  DEFAULT_HEALTH_COLORS,
+  withHealthColorDefaults,
   type HealthThresholds,
 } from './sprint-health';
 import { issue, sprint } from './__test-helpers__/sprint-fixtures';
@@ -503,5 +505,20 @@ describe('настройки порогов', () => {
     expect(n.puntedCount).toBe(2);
     expect(n.puntedCritCount).toBe(2);
     expect(n.velocityWindow).toBe(2);
+  });
+});
+
+describe('цвета уровней', () => {
+  it('дефолты — accent-палитра ADS (жёлтый именно жёлтый, а не оранжевый warning)', () => {
+    expect(DEFAULT_HEALTH_COLORS).toEqual({ ok: '#94C748', warn: '#EED12B', crit: '#F87168' });
+  });
+
+  it('свои цвета сохраняются, отсутствующие и битые заменяются дефолтами', () => {
+    expect(withHealthColorDefaults({ warn: '#ffee00' })).toEqual({
+      ...DEFAULT_HEALTH_COLORS,
+      warn: '#ffee00',
+    });
+    expect(withHealthColorDefaults({ crit: 'red', ok: '#12345' })).toEqual(DEFAULT_HEALTH_COLORS);
+    expect(withHealthColorDefaults(null)).toEqual(DEFAULT_HEALTH_COLORS);
   });
 });

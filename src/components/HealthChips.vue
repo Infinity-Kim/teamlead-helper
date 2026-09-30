@@ -1,13 +1,21 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
-import { isEvaluated, type RuleId, type RuleResult, type RuleStatus } from '@/core/metrics';
+import {
+  DEFAULT_HEALTH_COLORS,
+  isEvaluated,
+  type HealthColors,
+  type RuleId,
+  type RuleResult,
+  type RuleStatus,
+} from '@/core/metrics';
+import { levelStyle } from './health-tone';
 
 /**
  * Чипы «здоровья спринта»: по одному на правило, с коротким значением и цветом.
  *
  * Три уровня: зелёный — в норме, жёлтый — за первым порогом, красный — за вторым (issue #18).
  * Одного порога не хватало: 11% и 60% переноса красились одинаково, и по чипам было не
- * понять, где «стоит обсудить», а где «надо разбираться». Оба порога настраиваются в Options.
+ * понять, где «стоит обсудить», а где «надо разбираться». Пороги и цвета — в Options.
  *
  * `no-data` / `insufficient-history` показываются серым прочерком — визуально отличимы от ok,
  * чтобы «данных нет» нельзя было принять за «всё хорошо».
@@ -17,6 +25,8 @@ const props = defineProps<{
   results: RuleResult[];
   /** Какое правило сейчас раскрыто (подсветка активного чипа). */
   active?: RuleId | null;
+  /** Цвета уровней из настроек; по умолчанию — палитра ADS. */
+  colors?: HealthColors;
 }>();
 
 const emit = defineEmits<{ pick: [rule: RuleId] }>();
@@ -83,15 +93,15 @@ function display(r: RuleResult): string {
   return `${pct}%`;
 }
 
-const TONE: Record<RuleStatus, string> = {
-  crit: 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-200',
-  warn: 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200',
-  ok: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300',
-  'no-data':
-    'border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500',
-  'insufficient-history':
-    'border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500',
-};
+/** Серый для правил без оценки — чтобы «данных нет» не читалось как «всё хорошо». */
+const NEUTRAL =
+  'border-slate-200 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-500';
+
+function tone(status: RuleStatus): { class: string; style?: ReturnType<typeof levelStyle> } {
+  if (!isEvaluated(status)) return { class: NEUTRAL };
+  const c = props.colors ?? DEFAULT_HEALTH_COLORS;
+  return { class: 'text-slate-800 dark:text-slate-100', style: levelStyle(c[status]) };
+}
 
 /** Правила без данных кликать незачем — раскрывать нечего. */
 const clickable = (r: RuleResult) =>
@@ -108,8 +118,9 @@ const chips = computed(() => props.results);
       type="button"
       :disabled="!clickable(r)"
       class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition enabled:hover:brightness-95 disabled:cursor-default"
+      :style="tone(r.status).style"
       :class="[
-        TONE[r.status],
+        tone(r.status).class,
         active === r.rule ? 'ring-2 ring-indigo-400 ring-offset-1 dark:ring-offset-slate-900' : '',
       ]"
       :title="hint(r)"

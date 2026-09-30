@@ -8,6 +8,7 @@ import {
   statusConfig,
   jiraCreds,
   sprintHealthThresholds,
+  sprintHealthColors,
   teams,
   divisions,
   type QuarterUiMode,
@@ -21,11 +22,15 @@ import {
   type TeamBoard,
 } from '@/core/domain';
 import {
+  DEFAULT_HEALTH_COLORS,
   DEFAULT_HEALTH_SETTINGS,
   normalizeHealthSettings,
+  withHealthColorDefaults,
   withHealthDefaults,
+  type HealthColors,
   type HealthSettings,
 } from '@/core/metrics';
+import { levelStyle } from '@/components/health-tone';
 
 const targets = ref<CapTargets>({ Product: 67, Tech: 16.5, Support: 16.5 });
 const historyN = ref(6);
@@ -131,6 +136,22 @@ const canSave = computed(() => sumValid.value && namesValid.value);
  */
 const health = ref<HealthSettings>({ ...DEFAULT_HEALTH_SETTINGS });
 
+/** Цвета уровней здоровья (зелёный / жёлтый / красный). */
+const healthColors = ref<HealthColors>({ ...DEFAULT_HEALTH_COLORS });
+const COLOR_FIELDS: Array<{ key: keyof HealthColors; label: string }> = [
+  { key: 'ok', label: 'В норме' },
+  { key: 'warn', label: 'Первый порог' },
+  { key: 'crit', label: 'Второй порог' },
+];
+const colorsAreDefault = computed(() =>
+  COLOR_FIELDS.every(
+    (f) => healthColors.value[f.key].toLowerCase() === DEFAULT_HEALTH_COLORS[f.key].toLowerCase(),
+  ),
+);
+function resetHealthColors() {
+  healthColors.value = { ...DEFAULT_HEALTH_COLORS };
+}
+
 /** Ключи порогов с числовым значением (для v-model по ключу). */
 type HealthKey = keyof HealthSettings;
 
@@ -223,6 +244,7 @@ onMounted(async () => {
   }
   // Настройки до v0.6 не содержат вторых порогов — дополняем дефолтами.
   health.value = withHealthDefaults(await sprintHealthThresholds.getValue());
+  healthColors.value = withHealthColorDefaults(await sprintHealthColors.getValue());
   teamList.value = await teams.getValue();
   divisionList.value = await divisions.getValue();
   newTeamDivision.value = divisionList.value[0]?.id ?? '';
@@ -250,6 +272,7 @@ async function save() {
   // Пороги: без отрицательных, окно ≥ 2 спринтов, второй порог не ниже первого.
   health.value = normalizeHealthSettings(health.value);
   await sprintHealthThresholds.setValue({ ...health.value });
+  await sprintHealthColors.setValue(withHealthColorDefaults(healthColors.value));
   // Jira-креды: сохраняем только если заполнены email и токен.
   if (jiraEmail.value.trim() && jiraToken.value.trim()) {
     await jiraCreds.setValue({
@@ -630,10 +653,18 @@ async function save() {
           >
             <span></span>
             <span class="inline-flex items-center gap-1">
-              <span class="inline-block size-2 rounded-full bg-amber-400"></span>жёлтый
+              <span
+                class="inline-block size-2 rounded-full"
+                :style="{ backgroundColor: healthColors.warn }"
+              ></span
+              >жёлтый
             </span>
             <span class="inline-flex items-center gap-1">
-              <span class="inline-block size-2 rounded-full bg-rose-500"></span>красный
+              <span
+                class="inline-block size-2 rounded-full"
+                :style="{ backgroundColor: healthColors.crit }"
+              ></span
+              >красный
             </span>
             <span></span>
           </div>
@@ -693,6 +724,38 @@ async function save() {
               Сколько предыдущих спринтов берётся за базу скорости
             </span>
           </label>
+
+          <div class="mt-4">
+            <span class="mb-1 block text-xs font-medium">Цвета уровней</span>
+            <div class="flex flex-wrap items-center gap-4">
+              <label v-for="c in COLOR_FIELDS" :key="c.key" class="flex items-center gap-2">
+                <input
+                  v-model="healthColors[c.key]"
+                  type="color"
+                  :aria-label="`Цвет: ${c.label}`"
+                  class="h-7 w-9 cursor-pointer rounded border border-slate-300 bg-transparent p-0.5 dark:border-slate-700"
+                />
+                <span
+                  class="rounded border px-1.5 py-0.5 text-[10px] font-medium text-slate-800 dark:text-slate-100"
+                  :style="levelStyle(healthColors[c.key])"
+                >
+                  {{ c.label }}
+                </span>
+              </label>
+              <button
+                v-if="!colorsAreDefault"
+                type="button"
+                class="text-xs text-indigo-600 hover:underline dark:text-indigo-400"
+                @click="resetHealthColors"
+              >
+                Сбросить к цветам Jira
+              </button>
+            </div>
+            <span class="mt-1 block text-xs text-slate-400">
+              По умолчанию — палитра Atlassian (Jira): lime, yellow, red. Справа — как будет
+              выглядеть чип в отчёте.
+            </span>
+          </div>
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
