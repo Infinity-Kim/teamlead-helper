@@ -1,13 +1,13 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
-import type { RuleId, RuleResult, RuleStatus } from '@/core/metrics';
+import { isEvaluated, type RuleId, type RuleResult, type RuleStatus } from '@/core/metrics';
 
 /**
  * Чипы «здоровья спринта»: по одному на правило, с коротким значением и цветом.
  *
- * Палитра намеренно зелёный/янтарный, БЕЗ красного: инструмент планировочный, а не светофор
- * соответствия. Красный провоцирует защитную реакцию и подталкивает команду играть с цифрами
- * (дробить задачи, не заводить carryover явно) вместо разговора о причинах.
+ * Три уровня: зелёный — в норме, жёлтый — за первым порогом, красный — за вторым (issue #18).
+ * Одного порога не хватало: 11% и 60% переноса красились одинаково, и по чипам было не
+ * понять, где «стоит обсудить», а где «надо разбираться». Оба порога настраиваются в Options.
  *
  * `no-data` / `insufficient-history` показываются серым прочерком — визуально отличимы от ok,
  * чтобы «данных нет» нельзя было принять за «всё хорошо».
@@ -30,9 +30,24 @@ const LABEL: Record<RuleId, string> = {
   punted: 'выброшено',
 };
 
+/** Уровень словами — первой строкой подсказки, чтобы цвет чипа не приходилось угадывать. */
+const LEVEL: Partial<Record<RuleStatus, string>> = {
+  ok: 'в норме',
+  warn: 'за первым порогом (жёлтый)',
+  crit: 'за вторым порогом (красный)',
+};
+
 /** Развёрнутое пояснение для title (что именно значит число и с чем сравнили). */
 function hint(r: RuleResult): string {
+  const detail = describe(r);
+  const level = LEVEL[r.status];
+  return level ? `${detail}\nУровень: ${level}` : detail;
+}
+
+function describe(r: RuleResult): string {
   const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
+  // «20% / 30%» — первый (жёлтый) и второй (красный).
+  const limits = `${pct(r.threshold)} / ${pct(r.critThreshold)}`;
   switch (r.status) {
     case 'insufficient-history':
       return `${LABEL[r.rule]}: мало истории для сравнения (нужно больше закрытых спринтов)`;
@@ -45,17 +60,17 @@ function hint(r: RuleResult): string {
     case 'velocity-drop':
       // Явно говорим «ПРЕДЫДУЩИХ, без этого спринта»: в шапке страницы медиана считается
       // по последним 6 ВКЛЮЧАЯ текущий, и без уточнения два числа выглядят противоречиво.
-      return `Скорость ${r.value! > 0 ? 'ниже' : 'выше'} на ${pct(Math.abs(r.value!))} базы ${r.baseline} SP — это медиана 6 ПРЕДЫДУЩИХ спринтов (сам спринт в базу не входит, иначе он влиял бы на собственный порог). Порог: не ниже −${pct(r.threshold)}`;
+      return `Скорость ${r.value! > 0 ? 'ниже' : 'выше'} на ${pct(Math.abs(r.value!))} базы ${r.baseline} SP — это медиана 6 ПРЕДЫДУЩИХ спринтов (сам спринт в базу не входит, иначе он влиял бы на собственный порог). Пороги: не ниже −${pct(r.threshold)} / −${pct(r.critThreshold)}`;
     case 'carryover':
-      return `Перенесено ${pct(r.value!)} от взятого объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Порог: не более ${pct(r.threshold)}`;
+      return `Перенесено ${pct(r.value!)} от взятого объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Пороги: не более ${limits}`;
     case 'reestimate':
-      return `Оценки уже взятых задач выросли на ${pct(r.value!)} (+${r.evidence?.points ?? 0} SP). Порог: не более ${pct(r.threshold)}`;
+      return `Оценки уже взятых задач выросли на ${pct(r.value!)} (+${r.evidence?.points ?? 0} SP). Пороги: не более ${limits}`;
     case 'scope-added':
-      return `Добавлено после старта ${pct(r.value!)} от объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Порог: не более ${pct(r.threshold)}`;
+      return `Добавлено после старта ${pct(r.value!)} от объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Пороги: не более ${limits}`;
     case 'punted':
       return r.value === 0
         ? 'Из спринта после старта ничего не выбрасывали'
-        : `Выброшено ${r.value} зад. (${r.evidence?.points ?? 0} SP) после старта. Порог: ${r.threshold}`;
+        : `Выброшено ${r.value} зад. (${r.evidence?.points ?? 0} SP) после старта. Пороги: не более ${r.threshold} / ${r.critThreshold} зад.`;
   }
 }
 
@@ -69,6 +84,7 @@ function display(r: RuleResult): string {
 }
 
 const TONE: Record<RuleStatus, string> = {
+  crit: 'border-rose-300 bg-rose-50 text-rose-700 dark:border-rose-800 dark:bg-rose-950 dark:text-rose-200',
   warn: 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200',
   ok: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950 dark:text-emerald-300',
   'no-data':
@@ -79,7 +95,7 @@ const TONE: Record<RuleStatus, string> = {
 
 /** Правила без данных кликать незачем — раскрывать нечего. */
 const clickable = (r: RuleResult) =>
-  (r.status === 'warn' || r.status === 'ok') && (r.evidence?.issueKeys.length ?? 0) > 0;
+  isEvaluated(r.status) && (r.evidence?.issueKeys.length ?? 0) > 0;
 
 const chips = computed(() => props.results);
 </script>
@@ -92,7 +108,10 @@ const chips = computed(() => props.results);
       type="button"
       :disabled="!clickable(r)"
       class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition enabled:hover:brightness-95 disabled:cursor-default"
-      :class="[TONE[r.status], active === r.rule ? 'ring-2 ring-indigo-400 ring-offset-1 dark:ring-offset-slate-900' : '']"
+      :class="[
+        TONE[r.status],
+        active === r.rule ? 'ring-2 ring-indigo-400 ring-offset-1 dark:ring-offset-slate-900' : '',
+      ]"
       :title="hint(r)"
       @click.stop="clickable(r) && emit('pick', r.rule)"
     >

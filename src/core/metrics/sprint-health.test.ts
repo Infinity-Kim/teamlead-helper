@@ -9,19 +9,19 @@ import {
   healthSummary,
   healthVerdict,
   toThresholds,
+  withHealthDefaults,
+  normalizeHealthSettings,
+  grade,
+  DEFAULT_HEALTH_SETTINGS,
   type HealthThresholds,
 } from './sprint-health';
 import { issue, sprint } from './__test-helpers__/sprint-fixtures';
 
-/** Пороги по умолчанию (как в настройках расширения): 10/20/10/10/0, окно 6. */
-const T: HealthThresholds = toThresholds({
-  velocityDropPct: 10,
-  carryoverPct: 20,
-  reestimatePct: 10,
-  scopeAddedPct: 10,
-  puntedCount: 0,
-  velocityWindow: 6,
-});
+/**
+ * Пороги по умолчанию (как в настройках расширения), первый / второй:
+ * скорость 10/20, перенос 20/30, переоценка 10/20, добавлено 10/20, выброшено 0/3; окно 6.
+ */
+const T: HealthThresholds = toThresholds(DEFAULT_HEALTH_SETTINGS);
 
 /** Шесть предыдущих спринтов с заданной скоростью — база для velocity-drop. */
 function history(velocities: number[]) {
@@ -44,7 +44,7 @@ describe('ruleVelocityDrop', () => {
     const r = ruleVelocityDrop(s, history([100, 100, 100, 100, 100, 100]), T);
     expect(r.baseline).toBe(100);
     expect(r.value).toBe(0.9);
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('crit');
   });
 
   it('медиана устойчива к одиночному выбросу в истории', () => {
@@ -61,10 +61,18 @@ describe('ruleVelocityDrop', () => {
     expect(r.status).toBe('ok');
   });
 
-  it('просадка на 10.1% нарушает', () => {
+  it('просадка на 10.1% нарушает первый порог (жёлтый)', () => {
     const s = sprint({ sprintId: 1, completedIssues: [], completedPoints: 89.9 });
     const r = ruleVelocityDrop(s, history([100, 100, 100, 100, 100, 100]), T);
     expect(r.status).toBe('warn');
+  });
+
+  it('просадка ровно на втором пороге (20%) — ещё жёлтый, 20.1% — красный', () => {
+    const base = history([100, 100, 100, 100, 100, 100]);
+    const at = sprint({ sprintId: 1, completedIssues: [], completedPoints: 80 });
+    const over = sprint({ sprintId: 2, completedIssues: [], completedPoints: 79.9 });
+    expect(ruleVelocityDrop(at, base, T).status).toBe('warn');
+    expect(ruleVelocityDrop(over, base, T).status).toBe('crit');
   });
 
   it('рост скорости — ok (отрицательная просадка)', () => {
@@ -93,7 +101,7 @@ describe('ruleCarryover', () => {
     expect(r.status).toBe('ok'); // ровно порог
   });
 
-  it('превышение порога помечается warn и несёт ключи задач', () => {
+  it('превышение первого порога помечается warn и несёт ключи задач', () => {
     const s = sprint({
       sprintId: 1,
       completedIssues: [issue('A', 70)],
@@ -101,8 +109,19 @@ describe('ruleCarryover', () => {
     });
     const r = ruleCarryover(s, T);
     expect(r.value).toBe(0.3);
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('warn'); // ровно второй порог 30% — ещё жёлтый
+    expect(r.threshold).toBe(0.2);
+    expect(r.critThreshold).toBe(0.3);
     expect(r.evidence?.issueKeys).toEqual(['B', 'C']);
+  });
+
+  it('превышение второго порога → crit', () => {
+    const s = sprint({
+      sprintId: 1,
+      completedIssues: [issue('A', 60)],
+      notCompletedIssues: [issue('B', 40)],
+    });
+    expect(ruleCarryover(s, T).status).toBe('crit');
   });
 
   it('пустой спринт → no-data, а не деление на ноль', () => {
@@ -119,7 +138,7 @@ describe('ruleReestimate', () => {
     });
     const r = ruleReestimate(s, T);
     expect(r.value).toBe(0.3); // рост 3 при базе 10
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('crit'); // выше второго порога 20%
     expect(r.evidence?.issueKeys).toEqual(['A']);
   });
 
@@ -169,7 +188,7 @@ describe('ruleScopeAdded', () => {
     });
     const r = ruleScopeAdded(s, T);
     expect(r.value).toBe(0.25); // 20 / (100−20)
-    expect(r.status).toBe('warn');
+    expect(r.status).toBe('crit'); // выше второго порога 20%
     expect(r.evidence?.issueKeys).toEqual(['NEW']);
   });
 
@@ -210,7 +229,7 @@ describe('rulePunted', () => {
     expect(rulePunted(s, T).status).toBe('no-data');
   });
 
-  it('любой выброс при пороге 0 → warn, с ключами и SP', () => {
+  it('любой выброс при первом пороге 0 → warn, с ключами и SP', () => {
     const s = sprint({
       sprintId: 1,
       completedIssues: [issue('A', 5)],
@@ -221,6 +240,17 @@ describe('rulePunted', () => {
     expect(r.value).toBe(2);
     expect(r.evidence?.issueKeys).toEqual(['X', 'Y']);
     expect(r.evidence?.points).toBe(5);
+  });
+
+  it('больше 3 выброшенных задач (второй порог) → crit, ровно 3 — ещё warn', () => {
+    const mk = (n: number) =>
+      sprint({
+        sprintId: 1,
+        completedIssues: [issue('A', 5)],
+        puntedIssues: Array.from({ length: n }, (_, i) => issue(`P${i}`, 1)),
+      });
+    expect(rulePunted(mk(3), T).status).toBe('warn');
+    expect(rulePunted(mk(4), T).status).toBe('crit');
   });
 
   it('порог можно ослабить договорённостью команды', () => {
@@ -243,7 +273,7 @@ describe('healthBySprint', () => {
     const health = healthBySprint(sprints, T);
     const drop = health.get(10)?.find((r) => r.rule === 'velocity-drop');
     expect(drop?.baseline).toBe(100);
-    expect(drop?.status).toBe('warn');
+    expect(drop?.status).toBe('crit'); // просадка 50% — за вторым порогом
   });
 
   it('даёт результат по каждому спринту и по каждому из 5 правил', () => {
@@ -292,6 +322,14 @@ describe('healthVerdict', () => {
     const sprints = [1, 2, 3, 4].map((i) => mk(i, 30));
     const v = healthVerdict(healthSummary(sprints, T, 6));
     expect(v.chronic).toBe(true);
+    expect(v.critical).toBe(false); // 30% — ровно второй порог, ещё жёлтый
+  });
+
+  it('типичное значение фокуса за вторым порогом → critical', () => {
+    const sprints = [1, 2, 3, 4].map((i) => mk(i, 45));
+    const v = healthVerdict(healthSummary(sprints, T, 6));
+    expect(v.focus?.rule).toBe('carryover');
+    expect(v.critical).toBe(true);
   });
 
   it('замечает улучшение, а не только проблемы', () => {
@@ -311,28 +349,53 @@ describe('healthSummary', () => {
     ];
     const summary = healthSummary(sprints, T, 6);
     const drop = summary.find((s) => s.rule === 'velocity-drop')!;
-    expect(drop.warnCount).toBe(1);
+    expect(drop.warnCount).toBe(1); // warnCount включает и красные спринты
+    expect(drop.critCount).toBe(1);
     expect(drop.evaluated).toBe(1); // остальные 5 — insufficient-history
   });
 
   it('даёт типичное значение (медиану) и ориентир, а не только счётчик нарушений', () => {
     // Медиана устойчива к выбросу: 50% в одном спринте не делает «типичным» половину.
     const sprints = [
-      sprint({ sprintId: 3, completedIssues: [issue('A', 90)], notCompletedIssues: [issue('B', 10)] }),
-      sprint({ sprintId: 2, completedIssues: [issue('C', 90)], notCompletedIssues: [issue('D', 10)] }),
-      sprint({ sprintId: 1, completedIssues: [issue('E', 50)], notCompletedIssues: [issue('F', 50)] }),
+      sprint({
+        sprintId: 3,
+        completedIssues: [issue('A', 90)],
+        notCompletedIssues: [issue('B', 10)],
+      }),
+      sprint({
+        sprintId: 2,
+        completedIssues: [issue('C', 90)],
+        notCompletedIssues: [issue('D', 10)],
+      }),
+      sprint({
+        sprintId: 1,
+        completedIssues: [issue('E', 50)],
+        notCompletedIssues: [issue('F', 50)],
+      }),
     ];
     const carry = healthSummary(sprints, T, 6).find((s) => s.rule === 'carryover')!;
     expect(carry.typical).toBe(0.1);
     expect(carry.threshold).toBe(0.2);
+    expect(carry.critThreshold).toBe(0.3);
+    expect(carry.level).toBe('ok');
+    expect(carry.warnCount).toBe(1); // спринт с 50% переноса
+    expect(carry.critCount).toBe(1);
   });
 
   it('показывает направление и средние половин окна («было → стало»)', () => {
     // Перенос падает: старые 50%/50% → свежие 10%/10%.
     const bad = (id: number) =>
-      sprint({ sprintId: id, completedIssues: [issue(`C${id}`, 50)], notCompletedIssues: [issue(`D${id}`, 50)] });
+      sprint({
+        sprintId: id,
+        completedIssues: [issue(`C${id}`, 50)],
+        notCompletedIssues: [issue(`D${id}`, 50)],
+      });
     const good = (id: number) =>
-      sprint({ sprintId: id, completedIssues: [issue(`A${id}`, 90)], notCompletedIssues: [issue(`B${id}`, 10)] });
+      sprint({
+        sprintId: id,
+        completedIssues: [issue(`A${id}`, 90)],
+        notCompletedIssues: [issue(`B${id}`, 10)],
+      });
     // Вход от свежих к старым: свежие — хорошие.
     const carry = healthSummary([good(4), good(3), bad(2), bad(1)], T, 6).find(
       (s) => s.rule === 'carryover',
@@ -351,11 +414,94 @@ describe('healthSummary', () => {
 
   it('тренд разворачивается в хронологию (старые слева)', () => {
     const sprints = [
-      sprint({ sprintId: 2, completedIssues: [issue('A', 90)], notCompletedIssues: [issue('B', 10)] }),
-      sprint({ sprintId: 1, completedIssues: [issue('C', 50)], notCompletedIssues: [issue('D', 50)] }),
+      sprint({
+        sprintId: 2,
+        completedIssues: [issue('A', 90)],
+        notCompletedIssues: [issue('B', 10)],
+      }),
+      sprint({
+        sprintId: 1,
+        completedIssues: [issue('C', 50)],
+        notCompletedIssues: [issue('D', 50)],
+      }),
     ];
     const carry = healthSummary(sprints, T, 6).find((s) => s.rule === 'carryover')!;
     // sprintId=1 старше → его 50% идут первыми, свежие 10% — последними.
     expect(carry.trend).toEqual([0.5, 0.1]);
+  });
+});
+
+describe('grade', () => {
+  it('три уровня, границы включительно', () => {
+    expect(grade(0.1, 0.1, 0.2)).toBe('ok');
+    expect(grade(0.15, 0.1, 0.2)).toBe('warn');
+    expect(grade(0.2, 0.1, 0.2)).toBe('warn');
+    expect(grade(0.21, 0.1, 0.2)).toBe('crit');
+  });
+
+  it('второй порог ниже первого не даёт красному сработать раньше жёлтого', () => {
+    expect(grade(0.15, 0.2, 0.1)).toBe('ok');
+    expect(grade(0.25, 0.2, 0.1)).toBe('crit');
+  });
+});
+
+describe('настройки порогов', () => {
+  it('дефолты — из issue #18', () => {
+    expect(DEFAULT_HEALTH_SETTINGS).toEqual({
+      velocityDropPct: 10,
+      velocityDropCritPct: 20,
+      carryoverPct: 20,
+      carryoverCritPct: 30,
+      reestimatePct: 10,
+      reestimateCritPct: 20,
+      scopeAddedPct: 10,
+      scopeAddedCritPct: 20,
+      puntedCount: 0,
+      puntedCritCount: 3,
+      velocityWindow: 6,
+    });
+  });
+
+  it('настройки до v0.6 (без вторых порогов) дополняются дефолтами, свои значения сохраняются', () => {
+    const legacy = {
+      velocityDropPct: 15,
+      carryoverPct: 25,
+      reestimatePct: 10,
+      scopeAddedPct: 10,
+      puntedCount: 1,
+      velocityWindow: 4,
+    };
+    const s = withHealthDefaults(legacy);
+    expect(s.velocityDropPct).toBe(15);
+    expect(s.carryoverCritPct).toBe(30);
+    expect(s.puntedCritCount).toBe(3);
+    const t = toThresholds(legacy);
+    expect(t.carryover).toBe(0.25);
+    expect(t.carryoverCrit).toBe(0.3);
+    expect(t.velocityWindow).toBe(4);
+  });
+
+  it('мусор в storage (null, NaN, строка) не ломает сравнения', () => {
+    const s = withHealthDefaults({ carryoverPct: NaN, carryoverCritPct: 'x' as unknown as number });
+    expect(s.carryoverPct).toBe(20);
+    expect(s.carryoverCritPct).toBe(30);
+    expect(withHealthDefaults(null)).toEqual(DEFAULT_HEALTH_SETTINGS);
+  });
+
+  it('нормализация: без отрицательных, второй порог не ниже первого, штуки целые', () => {
+    const n = normalizeHealthSettings({
+      ...DEFAULT_HEALTH_SETTINGS,
+      carryoverPct: 40,
+      carryoverCritPct: 30,
+      reestimatePct: -5,
+      puntedCount: 1.6,
+      puntedCritCount: 0,
+      velocityWindow: 1,
+    });
+    expect(n.carryoverCritPct).toBe(40);
+    expect(n.reestimatePct).toBe(0);
+    expect(n.puntedCount).toBe(2);
+    expect(n.puntedCritCount).toBe(2);
+    expect(n.velocityWindow).toBe(2);
   });
 });
