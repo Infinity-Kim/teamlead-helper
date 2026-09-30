@@ -463,6 +463,22 @@ teams.watch(() => void onTeamsChanged());
 divisions.watch(() => void onTeamsChanged());
 quarterTarget.watch((v) => (target.value = v));
 
+/**
+ * Пороги здоровья поменяли в настройках — пересчитываем правила уже загруженных отчётов.
+ * Без сети: правила считаются из тех же спринтов, меняется только сравнение с порогами.
+ */
+sprintHealthThresholds.watch((v) => {
+  const t = toThresholds(v);
+  thresholds.value = t;
+  const rehealth = (r: TeamReport): TeamReport => ({
+    ...r,
+    health: healthBySprint(r.sprints, t),
+    healthSummary: healthSummary(r.sprints, t, VELOCITY_WINDOW),
+  });
+  for (const [id, r] of memCache) memCache.set(id, rehealth(r));
+  if (report.value) report.value = rehealth(report.value);
+});
+
 // --- Сводка дивизиона ---
 
 /**
@@ -532,6 +548,15 @@ function activeEvidence(sid: number) {
   return res?.evidence?.issues.length ? { rule, result: res, ...res.evidence } : null;
 }
 
+/** «30% при порогах 20% / 30%» — значение правила против жёлтого и красного порога. */
+function evidenceLimits(r: RuleResult): string {
+  if (r.rule === 'punted') {
+    return `${fmtNum(r.value ?? 0)} зад. при порогах ${fmtNum(r.threshold)} / ${fmtNum(r.critThreshold)}`;
+  }
+  const pct = (v: number) => `${Math.round(Math.abs(v) * 100)}%`;
+  return `${pct(r.value ?? 0)} при порогах ${pct(r.threshold)} / ${pct(r.critThreshold)}`;
+}
+
 /**
  * Задачи выбранного правила КАК КАРТОЧКИ: с заголовком, типом, статусом и вкладом в метрику.
  * Ищем во всех массивах спринта — punted/added задачи не лежат в completedIssues.
@@ -581,6 +606,20 @@ function summaryValue(rs: RuleSummary): string {
   return rs.rule === 'punted' ? `${fmtNum(rs.typical)} зад.` : fmtPct(rs.typical);
 }
 
+/** Пороги правила в сводке: «20% / 30%» или «0 / 3 зад.» — жёлтый / красный. */
+function summaryLimits(rs: RuleSummary): string {
+  return rs.rule === 'punted'
+    ? `${fmtNum(rs.threshold)} / ${fmtNum(rs.critThreshold)} зад.`
+    : `${fmtPct(rs.threshold)} / ${fmtPct(rs.critThreshold)}`;
+}
+
+/** Цвет типичного значения в сводке — по тем же двум порогам, что и чипы спринтов. */
+const LEVEL_TEXT: Record<'ok' | 'warn' | 'crit', string> = {
+  ok: 'text-slate-800 dark:text-slate-100',
+  warn: 'text-amber-700 dark:text-amber-400',
+  crit: 'text-rose-700 dark:text-rose-400',
+};
+
 /** Главный вывод по окну: что чинить, почему и что уже наладилось. */
 const verdict = computed(() => (report.value ? healthVerdict(report.value.healthSummary) : null));
 
@@ -617,9 +656,9 @@ const verdictText = computed(() => {
     if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'спринтах';
     return 'спринтах';
   };
-  const ref = f.rule === 'punted' ? `${fmtNum(f.threshold)} задач` : fmtPct(f.threshold);
+  const crit = f.critCount > 0 ? ` (в ${f.critCount} — за красным порогом)` : '';
   const parts: string[] = [
-    `Так в ${f.warnCount} ${plural(f.warnCount)} из ${f.evaluated}${v.chronic ? ' — это уже привычка, а не случайность' : ''}. Ориентир — ${ref}.`,
+    `Так в ${f.warnCount} ${plural(f.warnCount)} из ${f.evaluated}${crit}${v.chronic ? ' — это уже привычка, а не случайность' : ''}. Пороги — ${summaryLimits(f)}.`,
   ];
   if (v.cause && CAUSE[v.cause.rule]) {
     parts.push(`Вероятная причина: ${CAUSE[v.cause.rule]} (${summaryValue(v.cause)}).`);
@@ -671,7 +710,7 @@ function summaryHint(rs: RuleSummary): string {
   if (rs.evaluated === 0) {
     return `${SUMMARY_LABEL[rs.rule]}: нет спринтов, для которых правило можно посчитать (мало истории или Jira не отдала данные)`;
   }
-  const base = `${SUMMARY_LABEL[rs.rule]}: типично ${summaryValue(rs)} при ориентире ${rs.rule === 'punted' ? fmtNum(rs.threshold) + ' зад.' : fmtPct(rs.threshold)}. Вне ориентира ${rs.warnCount} из ${rs.evaluated} спринтов.`;
+  const base = `${SUMMARY_LABEL[rs.rule]}: типично ${summaryValue(rs)} при порогах ${summaryLimits(rs)} (жёлтый / красный). За первым порогом ${rs.warnCount} из ${rs.evaluated} спринтов, из них за вторым — ${rs.critCount}.`;
   if (rs.olderAvg === null || rs.recentAvg === null) return base;
   const fmt = rs.rule === 'punted' ? fmtNum : fmtPct;
   return `${base} Первая половина окна ${fmt(rs.olderAvg)} → вторая ${fmt(rs.recentAvg)}.`;
@@ -1175,9 +1214,11 @@ const CAP_SLICES_ALL = CAP_SLICES;
             <div
               class="px-4 py-3"
               :class="
-                verdict?.focus
-                  ? 'bg-amber-50/70 dark:bg-amber-950/20'
-                  : 'bg-emerald-50/60 dark:bg-emerald-950/20'
+                verdict?.critical
+                  ? 'bg-rose-50/70 dark:bg-rose-950/20'
+                  : verdict?.focus
+                    ? 'bg-amber-50/70 dark:bg-amber-950/20'
+                    : 'bg-emerald-50/60 dark:bg-emerald-950/20'
               "
             >
               <p class="text-sm font-medium text-slate-800 dark:text-slate-100">
@@ -1206,7 +1247,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
             <p
               class="border-t border-slate-100 px-4 pt-2 text-[10px] uppercase tracking-wide text-slate-400 dark:border-slate-800"
             >
-              типично за 6 спринтов / ориентир · динамика
+              типично за 6 спринтов / пороги (жёлтый / красный) · динамика
             </p>
             <div class="grid gap-x-6 gap-y-1.5 px-4 pb-2.5 pt-1.5 sm:grid-cols-2 xl:grid-cols-3">
               <!--
@@ -1224,12 +1265,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 </span>
                 <template v-if="rs.evaluated > 0">
                   <span class="whitespace-nowrap">
-                    <b class="tabular-nums text-slate-800 dark:text-slate-100">
+                    <b class="tabular-nums" :class="LEVEL_TEXT[rs.level ?? 'ok']">
                       {{ summaryValue(rs) }}
                     </b>
-                    <span class="text-slate-400">
-                      / {{ rs.rule === 'punted' ? fmtNum(rs.threshold) : fmtPct(rs.threshold) }}
-                    </span>
+                    <span class="text-slate-400"> / {{ summaryLimits(rs) }} </span>
                   </span>
                   <span
                     class="whitespace-nowrap text-right"
@@ -1480,11 +1519,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
                           {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
                           <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
-                            ·
-                            {{
-                              Math.round(Math.abs(activeEvidence(s.sprintId)!.result.value!) * 100)
-                            }}% при пороге
-                            {{ Math.round(activeEvidence(s.sprintId)!.result.threshold * 100) }}%
+                            · {{ evidenceLimits(activeEvidence(s.sprintId)!.result) }}
                           </template>
                         </span>
                         <button

@@ -8,6 +8,7 @@ import {
   type SprintReportDetail,
   type TeamBoard,
 } from '@/core/domain';
+import { DEFAULT_HEALTH_SETTINGS, type HealthSettings } from '@/core/metrics';
 
 /**
  * Типобезопасный слой хранилища расширения — ЕДИНЫЙ источник истины для persisted-state.
@@ -160,32 +161,12 @@ export const statusConfig = storage.defineItem<StatusConfig>('sync:statusConfig'
  * отличаться. Хардкод сделал бы метрику неоспоримой, что для планировочного (а не
  * отчётного) инструмента вредно — команда должна иметь возможность обсудить и сдвинуть порог.
  *
- * Дефолты — из формулировки задачи пользователя.
+ * Для каждого правила два порога: первый красит чип в жёлтый, второй — в красный (issue #18).
+ * Дефолты — DEFAULT_HEALTH_SETTINGS. Значения, сохранённые до v0.6 (без вторых порогов),
+ * читать через `withHealthDefaults` / `toThresholds` — они дополнят недостающее дефолтами.
  */
-export interface SprintHealthThresholds {
-  /** Просадка velocity от медианы предыдущих спринтов, % (10 = «не ниже −10%»). */
-  velocityDropPct: number;
-  /** Доля переноса SP от взятого объёма, % (20 = «не более 20%»). */
-  carryoverPct: number;
-  /** Рост оценок УЖЕ ВЗЯТЫХ задач от объёма на старте, %. */
-  reestimatePct: number;
-  /** Объём задач, добавленных после старта, от объёма на старте, %. */
-  scopeAddedPct: number;
-  /** Сколько задач допустимо выбросить из спринта после старта (0 = ни одной). */
-  puntedCount: number;
-  /** Размер окна для базы velocity (спринтов). */
-  velocityWindow: number;
-}
+export type SprintHealthThresholds = HealthSettings;
 export const sprintHealthThresholds = storage.defineItem<SprintHealthThresholds>(
   'sync:sprintHealthThresholds',
-  {
-    fallback: {
-      velocityDropPct: 10,
-      carryoverPct: 20,
-      reestimatePct: 10,
-      scopeAddedPct: 10,
-      puntedCount: 0,
-      velocityWindow: 6,
-    },
-  },
+  { fallback: { ...DEFAULT_HEALTH_SETTINGS } },
 );

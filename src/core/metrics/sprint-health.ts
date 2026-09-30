@@ -10,24 +10,26 @@ import { median } from './median';
  * Все данные берутся из уже загруженного Jira Sprint Report — дополнительных запросов НЕТ
  * (важно: страница и так упирается в rate-limit, см. sprintReportCache).
  *
- * Направление — ПЛАНИРОВАНИЕ, а не KPI-отчётность: статусы только ok/warn (без «критично»),
- * а пороги настраиваемые, потому что это командная договорённость, а не константа.
+ * Три уровня: ok (в норме) / warn (вышли за первый порог) / crit (вышли за второй).
+ * Второй порог отделяет «стоит обсудить» от «надо разбираться на ретро»: с одним порогом
+ * 11% и 60% переноса выглядели одинаково (issue #18).
+ * Пороги настраиваемые, потому что это командная договорённость, а не константа.
  */
 
 /** Идентификаторы правил. */
-export type RuleId =
-  | 'velocity-drop'
-  | 'carryover'
-  | 'reestimate'
-  | 'scope-added'
-  | 'punted';
+export type RuleId = 'velocity-drop' | 'carryover' | 'reestimate' | 'scope-added' | 'punted';
 
 /**
  * Статус правила.
  * `no-data` и `insufficient-history` НАМЕРЕННО отделены от `ok`: молчаливая деградация
  * «данных нет → значит всё хорошо» — худший вид вранья в метриках.
  */
-export type RuleStatus = 'ok' | 'warn' | 'no-data' | 'insufficient-history';
+export type RuleStatus = 'ok' | 'warn' | 'crit' | 'no-data' | 'insufficient-history';
+
+/** Статус, для которого правило реально посчитано (есть значение и сравнение с порогами). */
+export function isEvaluated(status: RuleStatus): status is 'ok' | 'warn' | 'crit' {
+  return status === 'ok' || status === 'warn' || status === 'crit';
+}
 
 /** Задача, попавшая в подтверждение правила, с её вкладом в число. */
 export interface EvidenceIssue {
@@ -56,8 +58,10 @@ export interface RuleResult {
    * null — статус no-data / insufficient-history.
    */
   value: number | null;
-  /** Порог, с которым сравнивали (в тех же единицах, что value). */
+  /** Первый порог — выше него warn (в тех же единицах, что value). */
   threshold: number;
+  /** Второй порог — выше него crit. Не меньше `threshold`. */
+  critThreshold: number;
   /** База сравнения для velocity-drop (медиана предыдущих спринтов), SP. */
   baseline?: number;
   evidence?: RuleEvidence;
@@ -66,28 +70,114 @@ export interface RuleResult {
 /** Пороги в ДОЛЯХ (0.1 = 10%), чтобы правила не пересчитывали проценты каждый раз. */
 export interface HealthThresholds {
   velocityDrop: number;
+  velocityDropCrit: number;
   carryover: number;
+  carryoverCrit: number;
   reestimate: number;
+  reestimateCrit: number;
   scopeAdded: number;
+  scopeAddedCrit: number;
   punted: number;
+  puntedCrit: number;
   velocityWindow: number;
 }
 
-/** Пороги из настроек (проценты) → доли. */
-export function toThresholds(pct: {
+/**
+ * Пороги в виде, в котором их вводит тимлид (проценты, штуки). Хранятся в настройках.
+ * Для каждого правила два порога: первый — жёлтый (warn), второй — красный (crit).
+ */
+export interface HealthSettings {
+  /** Просадка velocity от медианы предыдущих спринтов, % (10 = «не ниже −10%»). */
   velocityDropPct: number;
+  velocityDropCritPct: number;
+  /** Доля переноса SP от взятого объёма, % (20 = «не более 20%»). */
   carryoverPct: number;
+  carryoverCritPct: number;
+  /** Рост оценок УЖЕ ВЗЯТЫХ задач от объёма на старте, %. */
   reestimatePct: number;
+  reestimateCritPct: number;
+  /** Объём задач, добавленных после старта, от объёма на старте, %. */
   scopeAddedPct: number;
+  scopeAddedCritPct: number;
+  /** Сколько задач допустимо выбросить из спринта после старта (0 = ни одной). */
   puntedCount: number;
+  puntedCritCount: number;
+  /** Размер окна для базы velocity (спринтов). */
   velocityWindow: number;
-}): HealthThresholds {
+}
+
+/** Дефолты порогов (первый / второй): из issue #18. */
+export const DEFAULT_HEALTH_SETTINGS: Readonly<HealthSettings> = {
+  velocityDropPct: 10,
+  velocityDropCritPct: 20,
+  carryoverPct: 20,
+  carryoverCritPct: 30,
+  reestimatePct: 10,
+  reestimateCritPct: 20,
+  scopeAddedPct: 10,
+  scopeAddedCritPct: 20,
+  puntedCount: 0,
+  puntedCritCount: 3,
+  velocityWindow: 6,
+};
+
+/**
+ * Дополнить сохранённые настройки дефолтами. Нужно для миграции: до v0.6 в storage лежали
+ * только первые пороги, и без дополнения вторые пришли бы undefined → NaN в сравнениях.
+ */
+export function withHealthDefaults(
+  saved: Partial<HealthSettings> | null | undefined,
+): HealthSettings {
+  const out: HealthSettings = { ...DEFAULT_HEALTH_SETTINGS };
+  for (const key of Object.keys(out) as Array<keyof HealthSettings>) {
+    const v = saved?.[key];
+    if (typeof v === 'number' && Number.isFinite(v)) out[key] = v;
+  }
+  return out;
+}
+
+/**
+ * Привести настройки к корректным: без отрицательных, штуки/окно — целые, окно ≥ 2
+ * (иначе «медиана» бессмысленна), второй порог не ниже первого (иначе жёлтой зоны нет,
+ * а красный срабатывал бы раньше жёлтого).
+ */
+export function normalizeHealthSettings(s: HealthSettings): HealthSettings {
+  const pct = (v: number) => Math.max(0, v);
+  const count = (v: number) => Math.max(0, Math.round(v));
+  const velocityDropPct = pct(s.velocityDropPct);
+  const carryoverPct = pct(s.carryoverPct);
+  const reestimatePct = pct(s.reestimatePct);
+  const scopeAddedPct = pct(s.scopeAddedPct);
+  const puntedCount = count(s.puntedCount);
+  return {
+    velocityDropPct,
+    velocityDropCritPct: Math.max(velocityDropPct, pct(s.velocityDropCritPct)),
+    carryoverPct,
+    carryoverCritPct: Math.max(carryoverPct, pct(s.carryoverCritPct)),
+    reestimatePct,
+    reestimateCritPct: Math.max(reestimatePct, pct(s.reestimateCritPct)),
+    scopeAddedPct,
+    scopeAddedCritPct: Math.max(scopeAddedPct, pct(s.scopeAddedCritPct)),
+    puntedCount,
+    puntedCritCount: Math.max(puntedCount, count(s.puntedCritCount)),
+    velocityWindow: Math.max(2, Math.round(s.velocityWindow)),
+  };
+}
+
+/** Пороги из настроек (проценты) → доли. Недостающие поля берутся из дефолтов. */
+export function toThresholds(saved: Partial<HealthSettings> | null | undefined): HealthThresholds {
+  const pct = normalizeHealthSettings(withHealthDefaults(saved));
   return {
     velocityDrop: pct.velocityDropPct / 100,
+    velocityDropCrit: pct.velocityDropCritPct / 100,
     carryover: pct.carryoverPct / 100,
+    carryoverCrit: pct.carryoverCritPct / 100,
     reestimate: pct.reestimatePct / 100,
+    reestimateCrit: pct.reestimateCritPct / 100,
     scopeAdded: pct.scopeAddedPct / 100,
+    scopeAddedCrit: pct.scopeAddedCritPct / 100,
     punted: pct.puntedCount,
+    puntedCrit: pct.puntedCritCount,
     velocityWindow: pct.velocityWindow,
   };
 }
@@ -112,6 +202,19 @@ function overThreshold(value: number, threshold: number): boolean {
 }
 
 /**
+ * Уровень по двум порогам: выше второго — crit, выше первого — warn, иначе ok.
+ * Граница, как и раньше, НЕ нарушает: ровно 30% при втором пороге 30% — ещё warn.
+ */
+export function grade(
+  value: number,
+  threshold: number,
+  critThreshold: number,
+): 'ok' | 'warn' | 'crit' {
+  if (overThreshold(value, Math.max(threshold, critThreshold))) return 'crit';
+  return overThreshold(value, threshold) ? 'warn' : 'ok';
+}
+
+/**
  * 1. Просадка скорости. База — медиана completedPoints ПРЕДЫДУЩИХ `velocityWindow` спринтов.
  *
  * Оцениваемый спринт в базу НЕ входит: иначе он влияет на собственный порог и правило
@@ -132,19 +235,27 @@ export function ruleVelocityDrop(
       status: 'insufficient-history',
       value: null,
       threshold: t.velocityDrop,
+      critThreshold: t.velocityDropCrit,
     };
   }
   const base = median(window.map((s) => s.completedPoints));
   if (base === null || base <= 0) {
-    return { rule: 'velocity-drop', status: 'no-data', value: null, threshold: t.velocityDrop };
+    return {
+      rule: 'velocity-drop',
+      status: 'no-data',
+      value: null,
+      threshold: t.velocityDrop,
+      critThreshold: t.velocityDropCrit,
+    };
   }
   // Доля просадки: 0.12 = «ниже базы на 12%». Рост (отрицательная просадка) — всегда ok.
   const drop = round3((base - sprint.completedPoints) / base);
   return {
     rule: 'velocity-drop',
-    status: overThreshold(drop, t.velocityDrop) ? 'warn' : 'ok',
+    status: grade(drop, t.velocityDrop, t.velocityDropCrit),
     value: drop,
     threshold: t.velocityDrop,
+    critThreshold: t.velocityDropCrit,
     baseline: base,
   };
 }
@@ -162,14 +273,21 @@ export function ruleVelocityDrop(
 export function ruleCarryover(sprint: SprintReportDetail, t: HealthThresholds): RuleResult {
   const taken = sprint.completedPoints + sprint.notCompletedPoints;
   if (taken <= 0) {
-    return { rule: 'carryover', status: 'no-data', value: null, threshold: t.carryover };
+    return {
+      rule: 'carryover',
+      status: 'no-data',
+      value: null,
+      threshold: t.carryover,
+      critThreshold: t.carryoverCrit,
+    };
   }
   const share = round3(sprint.notCompletedPoints / taken);
   return {
     rule: 'carryover',
-    status: overThreshold(share, t.carryover) ? 'warn' : 'ok',
+    status: grade(share, t.carryover, t.carryoverCrit),
     value: share,
     threshold: t.carryover,
+    critThreshold: t.carryoverCrit,
     evidence: {
       issueKeys: sprint.notCompletedIssues.map((i) => i.key),
       points: sprint.notCompletedPoints,
@@ -219,14 +337,21 @@ export function ruleReestimate(sprint: SprintReportDetail, t: HealthThresholds):
   }
 
   if (base <= 0) {
-    return { rule: 'reestimate', status: 'no-data', value: null, threshold: t.reestimate };
+    return {
+      rule: 'reestimate',
+      status: 'no-data',
+      value: null,
+      threshold: t.reestimate,
+      critThreshold: t.reestimateCrit,
+    };
   }
   const share = round3(growth / base);
   return {
     rule: 'reestimate',
-    status: overThreshold(share, t.reestimate) ? 'warn' : 'ok',
+    status: grade(share, t.reestimate, t.reestimateCrit),
     value: share,
     threshold: t.reestimate,
+    critThreshold: t.reestimateCrit,
     evidence: { issueKeys: grown.map((g) => g.key), points: +growth.toFixed(1), issues: grown },
   };
 }
@@ -242,7 +367,13 @@ export function ruleReestimate(sprint: SprintReportDetail, t: HealthThresholds):
  */
 export function ruleScopeAdded(sprint: SprintReportDetail, t: HealthThresholds): RuleResult {
   if (!sprint.hasAddedData) {
-    return { rule: 'scope-added', status: 'no-data', value: null, threshold: t.scopeAdded };
+    return {
+      rule: 'scope-added',
+      status: 'no-data',
+      value: null,
+      threshold: t.scopeAdded,
+      critThreshold: t.scopeAddedCrit,
+    };
   }
 
   const added = allIssues(sprint).filter((i) => sprint.addedIssueKeys.has(i.key));
@@ -250,14 +381,21 @@ export function ruleScopeAdded(sprint: SprintReportDetail, t: HealthThresholds):
   const atStart = sprint.allPoints - addedPoints;
 
   if (atStart <= 0) {
-    return { rule: 'scope-added', status: 'no-data', value: null, threshold: t.scopeAdded };
+    return {
+      rule: 'scope-added',
+      status: 'no-data',
+      value: null,
+      threshold: t.scopeAdded,
+      critThreshold: t.scopeAddedCrit,
+    };
   }
   const share = round3(addedPoints / atStart);
   return {
     rule: 'scope-added',
-    status: overThreshold(share, t.scopeAdded) ? 'warn' : 'ok',
+    status: grade(share, t.scopeAdded, t.scopeAddedCrit),
     value: share,
     threshold: t.scopeAdded,
+    critThreshold: t.scopeAddedCrit,
     evidence: {
       issueKeys: added.map((i) => i.key),
       points: +addedPoints.toFixed(1),
@@ -275,14 +413,21 @@ export function ruleScopeAdded(sprint: SprintReportDetail, t: HealthThresholds):
  */
 export function rulePunted(sprint: SprintReportDetail, t: HealthThresholds): RuleResult {
   if (!sprint.hasPuntedData) {
-    return { rule: 'punted', status: 'no-data', value: null, threshold: t.punted };
+    return {
+      rule: 'punted',
+      status: 'no-data',
+      value: null,
+      threshold: t.punted,
+      critThreshold: t.puntedCrit,
+    };
   }
   const count = sprint.puntedIssues.length;
   return {
     rule: 'punted',
-    status: overThreshold(count, t.punted) ? 'warn' : 'ok',
+    status: grade(count, t.punted, t.puntedCrit),
     value: count,
     threshold: t.punted,
+    critThreshold: t.puntedCrit,
     evidence: {
       issueKeys: sprint.puntedIssues.map((i) => i.key),
       points: +sprint.puntedIssues.reduce((s, i) => s + points(i.points), 0).toFixed(1),
@@ -331,8 +476,10 @@ export function healthBySprint(
  */
 export interface RuleSummary {
   rule: RuleId;
-  /** Сколько спринтов окна нарушили правило (порог — ориентир, не вердикт). */
+  /** Сколько спринтов окна вышли за ПЕРВЫЙ порог (warn + crit; порог — ориентир, не вердикт). */
   warnCount: number;
+  /** Сколько из них вышли и за ВТОРОЙ порог (crit). */
+  critCount: number;
   /** Сколько спринтов реально оценивались (без no-data / insufficient-history). */
   evaluated: number;
   /** Значения по спринтам от СТАРЫХ к свежим — для спарклайна (null там, где не считалось). */
@@ -341,6 +488,10 @@ export interface RuleSummary {
   typical: number | null;
   /** Порог правила — чтобы UI показал «22% при ориентире 20%». */
   threshold: number;
+  /** Второй порог правила (красная зона). */
+  critThreshold: number;
+  /** Уровень ТИПИЧНОГО значения окна по двум порогам. null — нечего оценивать. */
+  level: 'ok' | 'warn' | 'crit' | null;
   /**
    * Куда движется: сравнение свежей половины окна со старой (та же логика, что в reliability).
    * 'up' — значение растёт, 'down' — падает. Что из этого хорошо, решает UI по смыслу правила.
@@ -399,20 +550,27 @@ export function healthSummary(
 
   return rules.map((rule) => {
     const results = recent.map((s) => health.get(s.sprintId)?.find((r) => r.rule === rule));
-    const counted = (r: RuleResult | undefined) => r?.status === 'warn' || r?.status === 'ok';
+    const counted = (r: RuleResult | undefined) => r !== undefined && isEvaluated(r.status);
     // Хронология: старые слева — так читаются спарклайны и так же считаются половины тренда.
     const trend = results.map((r) => (counted(r) ? r!.value : null)).reverse();
     const values = trend.filter((v): v is number => v !== null);
     const { older, recent: recentAvg, direction } = halves(values);
+    const first = results.find(counted);
+    const threshold = first?.threshold ?? 0;
+    const critThreshold = first?.critThreshold ?? 0;
+    const typical = median(values);
 
     return {
       rule,
-      warnCount: results.filter((r) => r?.status === 'warn').length,
+      warnCount: results.filter((r) => r?.status === 'warn' || r?.status === 'crit').length,
+      critCount: results.filter((r) => r?.status === 'crit').length,
       evaluated: results.filter(counted).length,
       trend,
       // Медиана, а не среднее: один аномальный спринт не должен задавать «типичное» значение.
-      typical: median(values),
-      threshold: results.find(counted)?.threshold ?? 0,
+      typical,
+      threshold,
+      critThreshold,
+      level: typical === null ? null : grade(typical, threshold, critThreshold),
       direction,
       olderAvg: older,
       recentAvg,
@@ -439,6 +597,8 @@ export interface HealthVerdict {
   worsening: boolean;
   /** Хроническая ли проблема: нарушена в большинстве спринтов окна. */
   chronic: boolean;
+  /** Типичное значение правила-фокуса за ВТОРЫМ порогом — вывод красится красным. */
+  critical: boolean;
 }
 
 /** Насколько правило превышает свой ориентир (в долях порога). Для сравнения разных метрик. */
@@ -487,5 +647,6 @@ export function healthVerdict(summaries: readonly RuleSummary[]): HealthVerdict 
     improved,
     worsening: focus?.direction === 'up',
     chronic: focus !== null && focus.warnCount > focus.evaluated / 2,
+    critical: focus?.level === 'crit',
   };
 }

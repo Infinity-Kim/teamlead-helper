@@ -11,7 +11,6 @@ import {
   teams,
   divisions,
   type QuarterUiMode,
-  type SprintHealthThresholds,
 } from '@/shared/storage';
 import {
   DEFAULT_TEAMS,
@@ -21,6 +20,12 @@ import {
   type Division,
   type TeamBoard,
 } from '@/core/domain';
+import {
+  DEFAULT_HEALTH_SETTINGS,
+  normalizeHealthSettings,
+  withHealthDefaults,
+  type HealthSettings,
+} from '@/core/metrics';
 
 const targets = ref<CapTargets>({ Product: 67, Tech: 16.5, Support: 16.5 });
 const historyN = ref(6);
@@ -124,59 +129,62 @@ const canSave = computed(() => sumValid.value && namesValid.value);
  * Пороги правил «здоровья спринта». Настраиваются, а не захардкожены: это командная
  * договорённость, и у разных команд она может отличаться.
  */
-const health = ref<SprintHealthThresholds>({
-  velocityDropPct: 10,
-  carryoverPct: 20,
-  reestimatePct: 10,
-  scopeAddedPct: 10,
-  puntedCount: 0,
-  velocityWindow: 6,
-});
+const health = ref<HealthSettings>({ ...DEFAULT_HEALTH_SETTINGS });
 
-/** Поля порогов: ключ + подпись + пояснение. */
+/** Ключи порогов с числовым значением (для v-model по ключу). */
+type HealthKey = keyof HealthSettings;
+
+/**
+ * Правила с двумя порогами: первый красит чип в жёлтый, второй — в красный.
+ * Второй ниже первого не сохранится — поднимется до первого (иначе жёлтой зоны нет).
+ */
 const HEALTH_FIELDS: Array<{
-  key: keyof SprintHealthThresholds;
+  warnKey: HealthKey;
+  critKey: HealthKey;
   label: string;
   hint: string;
   unit: string;
 }> = [
   {
-    key: 'velocityDropPct',
+    warnKey: 'velocityDropPct',
+    critKey: 'velocityDropCritPct',
     label: 'Просадка скорости',
-    hint: 'Насколько спринт может быть ниже медианы предыдущих, не вызывая флага',
+    hint: 'Насколько спринт может быть ниже медианы предыдущих',
     unit: '%',
   },
   {
-    key: 'carryoverPct',
+    warnKey: 'carryoverPct',
+    critKey: 'carryoverCritPct',
     label: 'Перенос по SP',
     hint: 'Доля незавершённого от взятого объёма (completed + перенос)',
     unit: '%',
   },
   {
-    key: 'reestimatePct',
+    warnKey: 'reestimatePct',
+    critKey: 'reestimateCritPct',
     label: 'Переоценка взятых задач',
     hint: 'Рост оценок задач, которые уже были в спринте на старте',
     unit: '%',
   },
   {
-    key: 'scopeAddedPct',
+    warnKey: 'scopeAddedPct',
+    critKey: 'scopeAddedCritPct',
     label: 'Добавлено после старта',
     hint: 'Объём задач, влетевших в спринт по ходу, от объёма на старте',
     unit: '%',
   },
   {
-    key: 'puntedCount',
+    warnKey: 'puntedCount',
+    critKey: 'puntedCritCount',
     label: 'Выброшено из спринта',
     hint: 'Сколько задач допустимо убрать из спринта после старта (0 — ни одной)',
     unit: 'зад.',
   },
-  {
-    key: 'velocityWindow',
-    label: 'Окно истории',
-    hint: 'Сколько предыдущих спринтов берётся за базу скорости',
-    unit: 'спр.',
-  },
 ];
+
+/** Второй порог ниже первого — подсвечиваем сразу, не дожидаясь сохранения. */
+const critBelowWarn = (f: (typeof HEALTH_FIELDS)[number]) =>
+  health.value[f.critKey] < health.value[f.warnKey];
 
 /** Строка «A, B, C» → массив без пустых/пробелов. */
 function parseStatuses(s: string): string[] {
@@ -213,7 +221,8 @@ onMounted(async () => {
     jiraEmail.value = creds.email;
     jiraToken.value = creds.apiToken;
   }
-  health.value = await sprintHealthThresholds.getValue();
+  // Настройки до v0.6 не содержат вторых порогов — дополняем дефолтами.
+  health.value = withHealthDefaults(await sprintHealthThresholds.getValue());
   teamList.value = await teams.getValue();
   divisionList.value = await divisions.getValue();
   newTeamDivision.value = divisionList.value[0]?.id ?? '';
@@ -238,15 +247,9 @@ async function save() {
     workStatuses: parseStatuses(workStatuses.value),
     doneStatuses: parseStatuses(doneStatuses.value),
   });
-  // Пороги: отрицательных не бывает, окно истории — минимум 2 спринта (иначе «медиана» бессмысленна).
-  await sprintHealthThresholds.setValue({
-    velocityDropPct: Math.max(0, health.value.velocityDropPct),
-    carryoverPct: Math.max(0, health.value.carryoverPct),
-    reestimatePct: Math.max(0, health.value.reestimatePct),
-    scopeAddedPct: Math.max(0, health.value.scopeAddedPct),
-    puntedCount: Math.max(0, Math.round(health.value.puntedCount)),
-    velocityWindow: Math.max(2, Math.round(health.value.velocityWindow)),
-  });
+  // Пороги: без отрицательных, окно ≥ 2 спринтов, второй порог не ниже первого.
+  health.value = normalizeHealthSettings(health.value);
+  await sprintHealthThresholds.setValue({ ...health.value });
   // Jira-креды: сохраняем только если заполнены email и токен.
   if (jiraEmail.value.trim() && jiraToken.value.trim()) {
     await jiraCreds.setValue({
@@ -618,25 +621,78 @@ async function save() {
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="mb-1 text-sm font-semibold">Здоровье спринта (пороги)</h2>
           <p class="mb-3 text-xs text-slate-400">
-            Правила на странице «Отчёт по спринтам»: спринт вне нормы помечается янтарным чипом. Это
-            ориентиры для планирования, а не оценка команды — меняйте под свои договорённости.
+            Правила на странице «Отчёт по спринтам»: за первым порогом чип спринта жёлтый, за вторым
+            — красный. Граница включительно: ровно на пороге — ещё норма. Это ориентиры для
+            планирования, а не оценка команды — меняйте под свои договорённости.
           </p>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <label v-for="f in HEALTH_FIELDS" :key="f.key" class="block">
-              <span class="mb-1 block text-xs font-medium">{{ f.label }}</span>
-              <div class="flex items-center gap-2">
-                <input
-                  v-model.number="health[f.key]"
-                  type="number"
-                  min="0"
-                  step="1"
-                  class="w-20 rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-                />
-                <span class="text-xs text-slate-400">{{ f.unit }}</span>
-              </div>
-              <span class="mt-1 block text-xs text-slate-400">{{ f.hint }}</span>
-            </label>
+          <div
+            class="mb-1 grid grid-cols-[minmax(0,1fr)_5rem_5rem_2.5rem] items-end gap-x-2 text-[11px] text-slate-400"
+          >
+            <span></span>
+            <span class="inline-flex items-center gap-1">
+              <span class="inline-block size-2 rounded-full bg-amber-400"></span>жёлтый
+            </span>
+            <span class="inline-flex items-center gap-1">
+              <span class="inline-block size-2 rounded-full bg-rose-500"></span>красный
+            </span>
+            <span></span>
           </div>
+          <div class="grid gap-2.5">
+            <div
+              v-for="f in HEALTH_FIELDS"
+              :key="f.warnKey"
+              class="grid grid-cols-[minmax(0,1fr)_5rem_5rem_2.5rem] items-center gap-x-2"
+            >
+              <div class="min-w-0">
+                <span class="block text-xs font-medium">{{ f.label }}</span>
+                <span class="block text-xs text-slate-400">{{ f.hint }}</span>
+                <span
+                  v-if="critBelowWarn(f)"
+                  class="block text-xs text-rose-600 dark:text-rose-400"
+                >
+                  Красный порог ниже жёлтого — при сохранении станет равен жёлтому
+                </span>
+              </div>
+              <input
+                v-model.number="health[f.warnKey]"
+                type="number"
+                min="0"
+                step="1"
+                :aria-label="`${f.label}: жёлтый порог`"
+                class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              />
+              <input
+                v-model.number="health[f.critKey]"
+                type="number"
+                min="0"
+                step="1"
+                :aria-label="`${f.label}: красный порог`"
+                class="w-full rounded-md border px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:bg-slate-800"
+                :class="
+                  critBelowWarn(f)
+                    ? 'border-rose-400 dark:border-rose-700'
+                    : 'border-slate-300 dark:border-slate-700'
+                "
+              />
+              <span class="text-xs text-slate-400">{{ f.unit }}</span>
+            </div>
+          </div>
+          <label class="mt-4 block">
+            <span class="mb-1 block text-xs font-medium">Окно истории</span>
+            <div class="flex items-center gap-2">
+              <input
+                v-model.number="health.velocityWindow"
+                type="number"
+                min="2"
+                step="1"
+                class="w-20 rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
+              />
+              <span class="text-xs text-slate-400">спр.</span>
+            </div>
+            <span class="mt-1 block text-xs text-slate-400">
+              Сколько предыдущих спринтов берётся за базу скорости
+            </span>
+          </label>
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
