@@ -32,7 +32,7 @@ import {
 type GhSprint = AgileSprintDto;
 
 /**
- * Все ЗАКРЫТЫЕ спринты доски через ОФИЦИАЛЬНЫЙ Agile API, с датами.
+ * Спринты доски в состояниях `states` (по умолчанию только закрытые) через ОФИЦИАЛЬНЫЙ Agile API, с датами.
  * Пагинация по `isLast` (НЕ по `total` — Jira Cloud его часто не отдаёт, JSWCLOUD-22101).
  *
  * Фильтр `originBoardId`: доска отдаёт и ЧУЖИЕ спринты — в выдаче board 80 реально приходят
@@ -40,11 +40,14 @@ type GhSprint = AgileSprintDto;
  * Спринты без originBoardId пропускаем в выдачу: поле опционально, а терять свои спринты
  * из-за его отсутствия хуже, чем изредка пустить чужой.
  */
-export async function fetchClosedSprints(rapidViewId: number): Promise<AgileSprintDto[]> {
+export async function fetchBoardSprints(
+  rapidViewId: number,
+  states = 'closed',
+): Promise<AgileSprintDto[]> {
   const out: AgileSprintDto[] = [];
   for (let startAt = 0, guard = 0; guard < MAX_SPRINT_PAGES; guard++) {
     const page = await jiraGetJsonRetry<AgileSprintPageDto>(
-      endpoints.boardSprints(rapidViewId, startAt),
+      endpoints.boardSprints(rapidViewId, startAt, states),
     );
     const values = page.values ?? [];
     out.push(
@@ -78,11 +81,10 @@ interface SprintReportsFetch {
 async function fetchRecentSprintReports(
   rapidViewId: number,
   limit: number,
-  filter: (s: GhSprint) => boolean = () => true,
+  states = 'closed',
 ): Promise<SprintReportsFetch> {
-  const all = await fetchClosedSprints(rapidViewId);
+  const all = await fetchBoardSprints(rapidViewId, states);
   const recent = all
-    .filter(filter)
     .sort((a, b) => Date.parse(b.startDate ?? '') - Date.parse(a.startDate ?? ''))
     .slice(0, Math.max(0, limit));
 
@@ -125,8 +127,11 @@ export async function getSprintVelocities(rapidViewId: number, lastN: number): P
 }
 
 /**
- * Спринты для квартального баланса: последние `limit` ЗАКРЫТЫХ спринтов с датой старта
- * и распределением completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
+ * Спринты для квартального баланса: последние `limit` спринтов (ЗАКРЫТЫЕ + АКТИВНЫЙ) с датой
+ * старта и распределением completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
+ *
+ * Активный нужен обязательно: без него факт квартала не видит закрытое в текущем спринте, «план»
+ * не считается, а на стыке кварталов бар показывает прошлый квартал вместо текущего.
  *
  * Бакеты считаются по completedIssues[] отчёта (labels + currentEstimateStatistic = SP на закрытии).
  * У активного спринта completedIssues = уже закрытые в нём задачи (план в работе).
@@ -135,7 +140,7 @@ export async function getQuarterSprints(
   rapidViewId: number,
   limit: number,
 ): Promise<SprintRecord[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, limit);
+  const { ok } = await fetchRecentSprintReports(rapidViewId, limit, 'closed,active');
 
   return ok
     .map(({ sprint, report }): SprintRecord => {
@@ -292,7 +297,7 @@ export async function getBoardSprintReportsSince(
   const since = Date.parse(sinceIso);
 
   // 1) Список спринтов С ДАТАМИ — 2 запроса вместо 83 (Agile API отдаёт startDate в списке).
-  const wanted = (await fetchClosedSprints(rapidViewId)).filter((s) => {
+  const wanted = (await fetchBoardSprints(rapidViewId)).filter((s) => {
     const t = Date.parse(s.startDate ?? '');
     return !Number.isNaN(t) && t >= since;
   });

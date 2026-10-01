@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { getBoardSprintReportsSince, setJiraTabTransport } from './index';
+import { getBoardSprintReportsSince, getQuarterSprints, setJiraTabTransport } from './index';
 import { setJiraAuth } from './client';
 import type { SprintReportDetail } from '@/core/domain';
 
@@ -84,5 +84,48 @@ describe('getBoardSprintReportsSince — кеш и «Обновить»', () => 
     const r = await getBoardSprintReportsSince(80, '2025-10-01', stale, true);
     expect(r.sprints).toHaveLength(1);
     expect(r.failed).toBe(1);
+  });
+});
+
+describe('getQuarterSprints — активный спринт в квартальном балансе', () => {
+  it('запрашивает closed+active и отдаёт активный спринт с его закрытыми и взятыми SP', async () => {
+    const calls: string[] = [];
+    setJiraAuth(null);
+    setJiraTabTransport(async (path) => {
+      calls.push(path);
+      if (path.includes('/rest/agile/1.0/board/80/sprint')) {
+        const values = [
+          { id: 1, name: 'S1', state: 'closed', startDate: '2026-09-09T10:00:00Z' },
+          { id: 2, name: 'S2', state: 'active', startDate: '2026-09-23T10:00:00Z' },
+        ];
+        return { ok: true, status: 200, body: JSON.stringify({ isLast: true, values }) };
+      }
+      const id = path.includes('sprintId=2') ? 2 : 1;
+      const est = (value: number) => ({ statFieldValue: { value } });
+      const body = {
+        sprint: {
+          id,
+          name: `S${id}`,
+          isoStartDate: id === 2 ? '2026-09-23T10:00:00Z' : '2026-09-09T10:00:00Z',
+        },
+        contents: {
+          completedIssues: [
+            { key: `K-${id}`, labels: ['CAP_Product'], currentEstimateStatistic: est(3) },
+          ],
+          issuesNotCompletedInCurrentSprint: [
+            { key: `N-${id}`, labels: ['CAP_Tech'], currentEstimateStatistic: est(5) },
+          ],
+        },
+      };
+      return { ok: true, status: 200, body: JSON.stringify(body) };
+    });
+
+    const records = await getQuarterSprints(80, 10);
+
+    expect(calls.find((c) => c.includes('/board/80/sprint'))).toContain('state=closed,active');
+    const active = records.find((r) => r.state === 'ACTIVE');
+    expect(active?.id).toBe(2);
+    expect(active?.points.Product).toBe(3);
+    expect(active?.notDonePoints.Tech).toBe(5);
   });
 });

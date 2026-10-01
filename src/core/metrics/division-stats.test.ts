@@ -68,3 +68,43 @@ describe('divisionQuarters — закрытие', () => {
     expect(q.completion).toMatchObject({ startPoints: 10, completedPoints: 10, ofStart: 1 });
   });
 });
+
+describe('divisionQuarters — задача, переехавшая через несколько спринтов', () => {
+  // ELCAS-7 (8 SP) взяли в S1, не закрыли, перенесли в S2, закрыли в S3. В Jira-отчётах она
+  // в S1 и S2 — notCompleted, в S3 — completed. В закрытые SP квартала она входит ОДИН раз.
+  const carried = issue('ELCAS-7', 8, ['CAP_Product']);
+  const teams = [
+    {
+      rapidViewId: 80,
+      team: 'El Casino',
+      sprints: [
+        sprint({ sprintId: 3, isoStartDate: '2026-08-05T10:00:00Z', completedIssues: [carried] }),
+        sprint({
+          sprintId: 2,
+          isoStartDate: '2026-07-22T10:00:00Z',
+          completedIssues: [issue('ELCAS-2', 2, ['CAP_Tech'])],
+          notCompletedIssues: [carried],
+        }),
+        sprint({
+          sprintId: 1,
+          isoStartDate: '2026-07-08T10:00:00Z',
+          completedIssues: [issue('ELCAS-1', 3, ['CAP_Product'])],
+          notCompletedIssues: [carried],
+        }),
+      ],
+    },
+  ];
+
+  it('закрытые SP и CAP-микс учитывают задачу только в спринте закрытия', () => {
+    const [q] = divisionQuarters(teams);
+    expect(q.completedSp).toBe(13);
+    expect(q.breakdown.totalPoints).toBe(13);
+    expect(q.breakdown.shares.find((s) => s.slice === 'Product')?.points).toBe(11);
+  });
+
+  it('«взяли/стало» — сумма обязательств спринтов: перенос входит в каждый спринт, где его брали', () => {
+    const [q] = divisionQuarters(teams);
+    expect(q.completion.completedPoints).toBe(13);
+    expect(q.completion.finalPoints).toBe(29); // 8 + (2+8) + (3+8)
+  });
+});

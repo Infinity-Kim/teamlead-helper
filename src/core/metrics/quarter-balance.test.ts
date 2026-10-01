@@ -179,3 +179,32 @@ describe('assignQuarters — не больше 6 спринтов в кварт�
     expect(nextQuarter('2026-Q2')).toBe('2026-Q3');
   });
 });
+
+describe('calcQuarterBalance — перенос между спринтами', () => {
+  const rec = (
+    id: number,
+    state: SprintRecord['state'],
+    product: number,
+    notDoneProduct: number,
+  ): SprintRecord => ({
+    id,
+    name: `S${id}`,
+    startDate: `2026-07-0${id}T10:00:00Z`,
+    state,
+    points: { Product: product, Tech: 0, Support: 0 },
+    unlabeledPoints: 0,
+    notDonePoints: { Product: notDoneProduct, Tech: 0, Support: 0 },
+    notDoneUnlabeled: 0,
+  });
+
+  it('незакрытое в закрытых спринтах не попадает ни в факт, ни в план — только в активном', () => {
+    // 8 SP переезжали S1 → S2 → S3 (активный): в плане они считаются один раз.
+    const b = calcQuarterBalance('2026-Q3', [
+      rec(1, 'CLOSED', 5, 8),
+      rec(2, 'CLOSED', 4, 8),
+      rec(3, 'ACTIVE', 0, 8),
+    ]);
+    expect(b.totalPoints).toBe(9);
+    expect(b.plannedTotal).toBe(17);
+  });
+});
