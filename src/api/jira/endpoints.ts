@@ -24,9 +24,9 @@ export const endpoints = {
    * `total` может отсутствовать (JSWCLOUD-22101) → пагинация ТОЛЬКО по `isLast`;
    * порядок фиксирован (state, затем позиция в backlog), параметра сортировки нет.
    */
-  boardSprints: (boardId: number, startAt: number) =>
+  boardSprints: (boardId: number, startAt: number, states = 'closed') =>
     `/rest/agile/1.0/board/${boardId}/sprint` +
-    `?state=closed&maxResults=${AGILE_PAGE_SIZE}&startAt=${startAt}`,
+    `?state=${states}&maxResults=${AGILE_PAGE_SIZE}&startAt=${startAt}`,
 
   /** Отчёт по закрытому спринту (содержит completed SP). */
   sprintReport: (rapidViewId: number, sprintId: number) =>
