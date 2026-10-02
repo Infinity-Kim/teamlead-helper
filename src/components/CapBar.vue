@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
 import type { SprintCapStats, CapSlice } from '@/core/domain';
+import { describePlan, type PlanCapacity } from '@/core/metrics';
 import { ADS, BUCKET_COLORS } from './ads-tokens';
 import InfoTip from './InfoTip.vue';
 
@@ -10,8 +11,8 @@ const props = defineProps<{
   targetProductPct: number;
   /** Активные бакеты-фильтры (мультивыбор; подсвечиваются). Пусто — фильтр не активен. */
   activeBuckets: CapSlice[];
-  /** Медиана completed SP за последние N спринтов (рекомендуемый capacity). null — нет данных. */
-  medianSp: number | null;
+  /** Рекомендуемый план на старте (цель выполнения + прилёты). null — нет данных. */
+  plan: PlanCapacity | null;
   /** Идёт пересчёт (после смены лейбла) — показываем индикатор. */
   refreshing: boolean;
 }>();
@@ -34,15 +35,17 @@ const skewLabel = computed(() => {
   return `${s.bucket} ${s.deltaPp > 0 ? '+' : ''}${s.deltaPp}%`;
 });
 
-/** Позиция маркера медианы на полосе, % (медиана SP относительно объёма спринта). null — не рисуем. */
-const medianPct = computed(() => {
-  if (props.medianSp == null || props.stats.totalPoints <= 0) return null;
-  return Math.min(100, (props.medianSp / props.stats.totalPoints) * 100);
+/** Позиция маркера рекомендуемого плана на полосе, % от объёма спринта. null — не рисуем. */
+const planPct = computed(() => {
+  if (props.plan == null || props.stats.totalPoints <= 0) return null;
+  return Math.min(100, (props.plan.recommended / props.stats.totalPoints) * 100);
 });
-/** Перебран ли план спринта относительно медианы (total > median). */
-const overMedian = computed(
-  () => props.medianSp != null && props.stats.totalPoints > props.medianSp,
+/** Взято больше рекомендуемого плана — риск не уложиться в целевое выполнение. */
+const overPlan = computed(
+  () => props.plan != null && props.stats.totalPoints > props.plan.recommended,
 );
+/** Подсказка к плану — только «можно чуть больше». */
+const planTitle = computed(() => (props.plan ? describePlan(props.plan) : ''));
 
 // --- ADS-токены (общие для виджетов, см. ads-tokens.ts) ---
 const T = ADS;
@@ -78,8 +81,8 @@ const S = {
     background: T.text,
     boxShadow: '0 0 0 1px var(--ds-surface, #fff)',
   }),
-  // Маркер медианы velocity (рекомендуемый capacity) — пунктирная вертикаль поверх полосы.
-  medianMark: (left: number) => ({
+  // Маркер рекомендуемого плана — пунктирная вертикаль поверх полосы.
+  planMark: (left: number) => ({
     position: 'absolute' as const,
     top: '-3px',
     bottom: '-3px',
@@ -149,32 +152,40 @@ function dot(bucket: CapSlice) {
   <div :style="S.root">
     <div :style="S.head">
       <span
-        :style="{ fontWeight: 600, color: T.text, display: 'inline-flex', alignItems: 'center', gap: '4px' }"
+        :style="{
+          fontWeight: 600,
+          color: T.text,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '4px',
+        }"
       >
         Capacity
         <InfoTip
           title="Баланс работы спринта (CAP-микс)"
           what="Как распределены story points спринта по типам работы: Product / Tech / Support."
           how="Сумма SP задач каждого типа ÷ весь размеченный объём. Цель и коридор задаются в настройках."
-          read="Полоса = факт, чёрточка = цель Product. Дельта в пп (±) у чипа = отклонение от цели. Медиана = типичный объём выполнения за прошлые спринты."
-          plan="Держите Product около цели. Если план (SP) сильно выше медианы — берёте больше, чем обычно закрываете: риск переноса."
+          read="Полоса = факт, чёрточка = цель Product. Дельта в пп (±) у чипа = отклонение от цели. «План ≤ N SP» (пунктир) — сколько брать на старте, чтобы закрыть 80%+ с учётом прилётов. ↗ — команда растёт."
+          plan="Держите Product около цели. Взяли больше «плана» — скорее всего не закроете 80%."
         />
       </span>
       <span :style="{ color: T.subtle }">{{ stats.totalPoints }} SP</span>
       <span
-        v-if="medianSp !== null"
+        v-if="plan !== null"
         :style="{
-          color: overMedian ? T.danger : T.subtle,
+          color: overPlan ? T.danger : T.subtle,
           display: 'inline-flex',
           alignItems: 'center',
           gap: '3px',
         }"
-        :title="`Медиана выполненных SP за последние спринты — рекомендуемый предел.${overMedian ? ' План превышает медиану.' : ''}`"
+        :title="planTitle"
       >
         <span
           :style="{ borderLeft: '2px dashed currentColor', height: '9px', display: 'inline-block' }"
         />
-        медиана {{ medianSp }} SP
+        план ≤ {{ plan.recommended }} SP<template v-if="plan.trend?.active">
+          {{ plan.trend.slope > 0 ? '↗' : '↘' }}</template
+        >
       </span>
       <span v-if="skewLabel" :style="{ color: T.danger, fontWeight: 600 }">⚠ {{ skewLabel }}</span>
       <span v-else-if="hasData" :style="{ color: T.success }">✓ в норме</span>
@@ -223,11 +234,7 @@ function dot(bucket: CapSlice) {
         :title="`${seg.bucket}: ${seg.points} SP (${seg.pct}%)`"
       />
       <div :style="S.target(targetProductPct)" :title="`Цель Product: ${targetProductPct}%`" />
-      <div
-        v-if="medianPct !== null"
-        :style="S.medianMark(medianPct)"
-        :title="`Медиана velocity (рекомендуемый capacity): ${medianSp} SP`"
-      />
+      <div v-if="planPct !== null" :style="S.planMark(planPct)" :title="planTitle" />
     </div>
     <div v-else :style="{ color: T.subtlest, fontStyle: 'italic', padding: '3px 0' }">
       нет оценённых задач
@@ -256,6 +263,5 @@ function dot(bucket: CapSlice) {
         </em>
       </span>
     </div>
-
   </div>
 </template>

@@ -115,18 +115,6 @@ export async function getBoardBacklog(rapidViewId: number): Promise<BoardBacklog
 }
 
 /**
- * Completed story points за последние `lastN` ЗАКРЫТЫХ спринтов доски (для медианы velocity).
- * Источник: Agile API (список закрытых, с датами) → sprintreport каждого. Deep module.
- *
- * Нюанс (изучен на реальном API): completed SP = contents.completedIssuesEstimateSum.value,
- * где `value` может ОТСУТСТВОВАТЬ → 0. Хронология — по startDate из Agile API.
- */
-export async function getSprintVelocities(rapidViewId: number, lastN: number): Promise<number[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
-  return ok.map(({ report }) => report.contents?.completedIssuesEstimateSum?.value ?? 0);
-}
-
-/**
  * Спринты для квартального баланса: последние `limit` спринтов (ЗАКРЫТЫЕ + АКТИВНЫЙ) с датой
  * старта и распределением completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
  *
@@ -262,20 +250,6 @@ function bucketizeReport(issues: GhSprintReportDto['contents']['completedIssues'
       points: i.currentEstimateStatistic?.statFieldValue?.value ?? 0,
     })),
   );
-}
-
-/**
- * Детальные отчёты последних `lastN` ЗАКРЫТЫХ спринтов доски — для страницы sprint-отчёта.
- * Каждый спринт: completed SP (current = green bar) + список completed/carryover задач
- * с summary/status/type. Источник — Jira Sprint Report (данные точные, как в retrospective).
- * Deep module: наружу domain SprintReportDetail[], внутри спрятан greenhopper.
- */
-export async function getBoardSprintReports(
-  rapidViewId: number,
-  lastN: number,
-): Promise<SprintReportDetail[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
-  return ok.map(({ report }) => mapSprintReportDetail(report));
 }
 
 /**
