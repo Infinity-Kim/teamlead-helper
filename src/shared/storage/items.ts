@@ -118,7 +118,7 @@ export const sprintListCache = storage.defineItem<Record<string, SprintListCache
 /** Свежесть списка спринтов. Спринты закрываются раз в 2 недели — 15 минут с запасом. */
 export const SPRINT_LIST_TTL_MS = 15 * 60 * 1000;
 
-/** Сколько последних закрытых спринтов брать для медианы velocity (рекомендуемый capacity). */
+/** Сколько последних закрытых спринтов брать для порогов возраста задач (Work Item Age). */
 export const sprintHistoryCount = storage.defineItem<number>('sync:sprintHistoryCount', {
   fallback: 6,
 });

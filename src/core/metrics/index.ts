@@ -6,3 +6,4 @@ export * from './sprint-report-stats';
 export * from './work-item-age';
 export * from './division-stats';
 export * from './sprint-completion';
+export * from './plan-capacity';

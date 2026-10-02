@@ -12,15 +12,16 @@ import {
   teams,
   divisions,
   quarterTarget,
-  sprintReportCache,
   sprintHealthThresholds,
   sprintHealthColors,
-  SPRINT_CACHE_LIMIT,
   type QuarterTargetConfig,
+  readSprintCache,
+  writeSprintCache,
 } from '@/shared/storage';
 import {
   divisionTeams,
   SPRINTS_PER_QUARTER,
+  CAP_LABELS_SINCE_ISO,
   type CapSlice,
   type Division,
   type SprintReportDetail,
@@ -31,6 +32,10 @@ import {
   groupSprintsByQuarter,
   sprintCapBreakdown,
   velocitySummary,
+  planCapacity,
+  sprintFlow,
+  type SprintFlow,
+  describePlan,
   issueInSlice,
   healthBySprint,
   healthSummary,
@@ -46,6 +51,7 @@ import {
   CAP_SLICES,
   type QuarterGroup,
   type VelocitySummary,
+  type PlanCapacity,
   type CapBreakdown,
   type DivisionQuarter,
   type CompletionRates,
@@ -58,11 +64,6 @@ import { BUCKET_COLORS } from '@/components/ads-tokens';
 import HealthChips from '@/components/HealthChips.vue';
 import { levelStyle, type HealthLevel } from '@/components/health-tone';
 
-/**
- * Спринты берём со стартом от Q4 2025 — раньше CAP-метки в Jira не проставлялись
- * (ранние спринты дали бы 100% «Без метки», см. проверку на живых данных).
- */
-const SINCE_ISO = '2025-10-01';
 /** Окно для average velocity. */
 const VELOCITY_WINDOW = 6;
 /** Псевдо-дивизион для включённых команд, не попавших ни в один дивизион. */
@@ -75,6 +76,10 @@ interface TeamReport {
   sprints: SprintReportDetail[];
   quarters: QuarterGroup[];
   velocity: VelocitySummary;
+  /** История для модели плана: спринты отчёта, старые → свежие. */
+  planFlows: SprintFlow[];
+  /** Рекомендуемый план на старте (цель выполнения + прилёты + тренд). */
+  plan: PlanCapacity | null;
   sprintCount: number;
   /** Сколько спринтов не загрузилось (частичные данные) — показываем плашку. */
   failed: number;
@@ -115,8 +120,23 @@ async function waitJiraTabReady(timeoutMs = 30_000): Promise<{ ready: boolean; p
   }
 }
 
+/** Сколько брать на старте: цель выполнения = 1 − порог переноса (20% → 80%). */
+function planFor(flows: readonly SprintFlow[], t: HealthThresholds): PlanCapacity | null {
+  return planCapacity(flows, 1 - t.carryover);
+}
+
+/** Расшифровка плана для подсказки — общий текст с бэклогом. */
+function planTitle(p: PlanCapacity): string {
+  return describePlan(p);
+}
+
 /** Собрать TeamReport из сырья спринтов. */
-function buildReport(team: TeamBoard, sprints: SprintReportDetail[], failed: number): TeamReport {
+function buildReport(
+  team: TeamBoard,
+  sprints: SprintReportDetail[],
+  failed: number,
+  planFlows: SprintFlow[],
+): TeamReport {
   const t = thresholds.value;
   return {
     team: team.name,
@@ -124,6 +144,8 @@ function buildReport(team: TeamBoard, sprints: SprintReportDetail[], failed: num
     sprints,
     quarters: groupSprintsByQuarter(sprints),
     velocity: velocitySummary(sprints, VELOCITY_WINDOW),
+    planFlows,
+    plan: t ? planFor(planFlows, t) : null,
     sprintCount: sprints.length,
     failed,
     health: t ? healthBySprint(sprints, t) : new Map(),
@@ -231,56 +253,6 @@ function applyReport(r: TeamReport) {
 }
 
 /**
- * Отчёты закрытых спринтов из persist-кеша. Без TTL: состав спринта после закрытия не меняется,
- * а метки/оценки, поправленные позже, подтягивает кнопка «Обновить».
- */
-async function readSprintCache(): Promise<Map<number, SprintReportDetail>> {
-  const cache = await sprintReportCache.getValue();
-  const out = new Map<number, SprintReportDetail>();
-  for (const [id, entry] of Object.entries(cache ?? {})) {
-    // addedIssueKeys — Set, а JSON его не переживает: восстанавливаем из массива.
-    out.set(Number(id), reviveDetail(entry.detail));
-  }
-  return out;
-}
-
-/**
- * chrome.storage сериализует через JSON, поэтому Set превращается в {} — восстанавливаем.
- * Без этого правило reestimate перестало бы исключать добавленные задачи (двойной счёт).
- */
-function reviveDetail(d: SprintReportDetail): SprintReportDetail {
-  const keys = d.addedIssueKeys;
-  return {
-    ...d,
-    addedIssueKeys: keys instanceof Set ? keys : new Set(Array.isArray(keys) ? keys : []),
-  };
-}
-
-/**
- * Дописать свежедобытые отчёты в кеш, вытеснив самые старые при переполнении.
- * Пишем ДАЖЕ при частичной загрузке — иначе упавший спринт пришлось бы тянуть каждый раз заново.
- */
-async function writeSprintCache(fetched: ReadonlyMap<number, SprintReportDetail>) {
-  if (fetched.size === 0) return;
-  const cache = { ...(await sprintReportCache.getValue()) };
-  const now = Date.now();
-  for (const [id, detail] of fetched) {
-    // Set не сериализуется в chrome.storage — кладём массивом, обратно поднимаем в reviveDetail.
-    cache[String(id)] = {
-      detail: { ...detail, addedIssueKeys: [...detail.addedIssueKeys] as unknown as Set<string> },
-      cachedAt: now,
-    };
-  }
-  const entries = Object.entries(cache);
-  if (entries.length > SPRINT_CACHE_LIMIT) {
-    entries.sort((a, b) => b[1].cachedAt - a[1].cachedAt);
-    await sprintReportCache.setValue(Object.fromEntries(entries.slice(0, SPRINT_CACHE_LIMIT)));
-    return;
-  }
-  await sprintReportCache.setValue(cache);
-}
-
-/**
  * Настроить доступ к Jira. Два пути: токен — основной (работает всегда). Без токена идём
  * через ОТКРЫТУЮ вкладку Jira: там живут cookie сессии SSO, и запросы делает content-script.
  * false — доступа нет, текст ошибки уже выставлен.
@@ -324,13 +296,14 @@ async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
   if (mem) return mem;
   const { sprints, failed, fetched } = await getBoardSprintReportsSince(
     team.rapidViewId,
-    SINCE_ISO,
+    CAP_LABELS_SINCE_ISO,
     await readSprintCache(),
     fresh,
   );
-  const built = buildReport(team, sprints, failed);
-  memCache.set(team.rapidViewId, built);
   await writeSprintCache(fetched);
+  // План — по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии.
+  const built = buildReport(team, sprints, failed, sprints.map(sprintFlow).reverse());
+  memCache.set(team.rapidViewId, built);
   return built;
 }
 
@@ -483,6 +456,7 @@ sprintHealthThresholds.watch((v) => {
     ...r,
     health: healthBySprint(r.sprints, t),
     healthSummary: healthSummary(r.sprints, t, VELOCITY_WINDOW),
+    plan: planFor(r.planFlows, t),
   });
   for (const [id, r] of memCache) memCache.set(id, rehealth(r));
   if (report.value) report.value = rehealth(report.value);
@@ -1207,6 +1181,16 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     медиана {{ fmtNum(report.velocity.median) }} SP
                   </b>
                   · среднее {{ fmtNum(report.velocity.mean!) }} SP
+                </span>
+                <span v-if="report.plan" :title="planTitle(report.plan)">
+                  · план на старт
+                  <b class="text-slate-700 dark:text-slate-200">
+                    ≤ {{ report.plan.recommended }} SP
+                  </b>
+                  <template v-if="report.plan.trend?.active">
+                    {{ report.plan.trend.slope > 0 ? '↗' : '↘' }}
+                  </template>
+                  · вызов {{ report.plan.stretch }}
                 </span>
               </template>
               <template v-else>velocity: нет данных</template>

@@ -3,7 +3,7 @@ import CapBar from '@/components/CapBar.vue';
 import QuarterBar from '@/components/QuarterBar.vue';
 import {
   getBoardBacklog,
-  getSprintVelocities,
+  getBoardSprintReportsSince,
   getQuarterSprints,
   getAgingIssues,
   getCycleTimeHistory,
@@ -12,7 +12,11 @@ import {
   issuesOfSprint,
   calcCapDistribution,
   issueKeysByBucket,
-  median,
+  planCapacity,
+  sprintFlow,
+  targetCompletionFromCarryover,
+  withHealthDefaults,
+  type PlanCapacity,
   groupByQuarter,
   calcQuarterBalance,
   ageThresholdsFromHistory,
@@ -23,12 +27,20 @@ import {
   capTargets,
   boardConfig,
   sprintHistoryCount,
+  sprintHealthThresholds,
+  readSprintCache,
+  writeSprintCache,
   quarterTarget,
   quarterUiMode,
   statusConfig,
 } from '@/shared/storage';
 import { TARGET } from '@/shared/messaging';
-import { BUCKET_TO_CAP_LABEL, ALL_CAP_LABELS, bucketForLabel } from '@/core/domain';
+import {
+  BUCKET_TO_CAP_LABEL,
+  ALL_CAP_LABELS,
+  bucketForLabel,
+  CAP_LABELS_SINCE_ISO,
+} from '@/core/domain';
 import type {
   BoardBacklog,
   CapBucket,
@@ -66,7 +78,7 @@ interface CapBarProps {
   stats: SprintCapStats;
   targetProductPct: number;
   activeBuckets: CapSlice[];
-  medianSp: number | null;
+  plan: PlanCapacity | null;
   refreshing: boolean;
 }
 interface Mounted {
@@ -136,10 +148,14 @@ export default defineContentScript({
     let dataFingerprint = '';
     // Доска, для которой сейчас загружены данные (для детекта смены доски в SPA).
     let currentBoardId: number | null = null;
+    // Поколение доски: растёт при каждой смене. Фоновые загрузки (план, квартал, возраст) идут
+    // секундами; если за это время ушли на другую доску, их результат относится к СТАРОЙ доске
+    // и не должен попасть в виджеты новой — иначе на Web показывались цифры El Casino.
+    let boardGen = 0;
     // Ключи задач без CAP-метки — для подсветки Unlabeled на доске.
     let unlabeledKeys = new Set<string>();
-    // Медиана completed SP за последние N спринтов (рекомендуемый capacity). null — нет данных.
-    let medianSp: number | null = null;
+    // Рекомендуемый план на старте спринта (выполнение ≥ цели с учётом прилётов). null — нет данных.
+    let plan: PlanCapacity | null = null;
     // Квартальный баланс текущего квартала (того, где активный спринт). null — нет данных.
     let quarterBalance: QuarterBalance | null = null;
     // Id активного спринта на доске (для подсветки застревающих задач).
@@ -169,9 +185,18 @@ export default defineContentScript({
     /** Загрузить и пересчитать. Возвращает true, если данные изменились (отпечаток другой). */
     async function loadData(): Promise<boolean> {
       const rapidViewId = await resolveRapidViewId();
+      // Смену доски ловим ЗДЕСЬ, а не только в MutationObserver: в Jira DOM может
+      // перерисоваться раньше смены URL, и тогда первым новую доску видит отложенный рефетч.
+      // Без сброса виджеты новой доски монтировались со старым планом (Web → El Casino
+      // показывал план Web — воспроизведено в Playwright).
+      const switched = currentBoardId !== null && rapidViewId !== currentBoardId;
+      if (switched) resetForBoardChange();
       currentBoardId = rapidViewId;
+      const gen = boardGen;
       const backlog: BoardBacklog = await getBoardBacklog(rapidViewId);
       targets = await capTargets.getValue();
+      // Отложенный рефетч старой доски, вернувшийся после перехода, не должен затереть новую.
+      if (gen !== boardGen) return false;
 
       const fp = fingerprint(backlog);
       const changed = fp !== dataFingerprint;
@@ -188,22 +213,40 @@ export default defineContentScript({
         const sprintIssues = issuesOfSprint(backlog.issues, sprint.id);
         statsBySprintId.set(sprint.id, calcCapDistribution(sprint, sprintIssues, targets));
       }
+      if (switched) {
+        renderAll();
+        void loadPlan().then(loadQuarter).then(loadAging);
+      }
       return changed;
     }
 
     /**
-     * Загрузить медиану velocity (отдельно от backlog — это N+1 запросов, не гоняем на каждом рефетче).
-     * Вызывается один раз при старте + при смене доски/настройки N.
+     * Загрузить рекомендуемый план (отдельно от backlog — это N+1 запросов, не гоняем на каждом
+     * рефетче). Цель выполнения = 100% − порог переноса из настроек здоровья (20% → 80%).
+     * Вызывается один раз при старте + при смене доски/порогов.
      */
-    async function loadMedian() {
+    async function loadPlan() {
+      const gen = boardGen;
       try {
         const rapidViewId = await resolveRapidViewId();
-        const n = await sprintHistoryCount.getValue();
-        const velocities = await getSprintVelocities(rapidViewId, n);
-        medianSp = median(velocities);
-        for (const m of mounted.values()) m.props.medianSp = medianSp;
+        const health = withHealthDefaults(await sprintHealthThresholds.getValue());
+        // История модели — закрытые спринты с появления CAP-меток, как в отчёте. Закрытые
+        // спринты неизменны: берём их из общего с отчётом кеша, из Jira — только новые.
+        const res = await getBoardSprintReportsSince(
+          rapidViewId,
+          CAP_LABELS_SINCE_ISO,
+          await readSprintCache(),
+        );
+        await writeSprintCache(res.fetched); // кеш по sprintId — пишем и для ушедшей доски
+        if (gen !== boardGen) return;
+        // Отчёты приходят свежими первыми, модели нужна хронология.
+        plan = planCapacity(
+          res.sprints.map(sprintFlow).reverse(),
+          targetCompletionFromCarryover(health.carryoverPct),
+        );
+        for (const m of mounted.values()) m.props.plan = plan;
       } catch (e) {
-        console.warn('[TLH] loadMedian failed:', e);
+        console.warn('[TLH] loadPlan failed:', e);
       }
     }
 
@@ -212,11 +255,13 @@ export default defineContentScript({
      * Спринты относим к кварталу по ДАТЕ СТАРТА (методология). Считаем по completed-задачам.
      */
     async function loadQuarter() {
+      const gen = boardGen;
       try {
         const rapidViewId = await resolveRapidViewId();
         // Берём с запасом (10) — покрыть текущий квартал (6) + границу.
         const records = await getQuarterSprints(rapidViewId, 10);
         const target = await quarterTarget.getValue();
+        if (gen !== boardGen) return;
 
         // Текущий квартал = квартал активного спринта (или самого свежего по старту). Квартал
         // берём из группировки, а не из календаря: спринт со старта в конце квартала может
@@ -246,6 +291,7 @@ export default defineContentScript({
      * cycle time. Подсвечивает aging/stuck карточки на доске. N+1 запросов changelog — фоном.
      */
     async function loadAging() {
+      const gen = boardGen;
       try {
         if (activeSprintId === null) {
           agingByKey = new Map();
@@ -259,6 +305,7 @@ export default defineContentScript({
           getCycleTimeHistory(rapidViewId, n, status.workStatuses, status.doneStatuses),
           getAgingIssues(rapidViewId, activeSprintId, status.workStatuses),
         ]);
+        if (gen !== boardGen) return;
         const thresholds = ageThresholdsFromHistory(history);
         const now = Date.now();
         const aged = calcAgingIssues(aging, thresholds, now);
@@ -726,7 +773,7 @@ export default defineContentScript({
         stats,
         targetProductPct: targets.Product,
         activeBuckets: activeSlices(),
-        medianSp,
+        plan,
         refreshing,
       });
       const app = createApp({
@@ -735,7 +782,7 @@ export default defineContentScript({
             stats: props.stats,
             targetProductPct: props.targetProductPct,
             activeBuckets: props.activeBuckets,
-            medianSp: props.medianSp,
+            plan: props.plan,
             refreshing: props.refreshing,
             onBucketClick: (b: CapSlice) => onBucketClick(sprintId, b),
             onClearAll,
@@ -794,6 +841,8 @@ export default defineContentScript({
 
     /** Сброс при переходе на другую доску (SPA-навигация): размонтируем виджеты, чистим кэш. */
     function resetForBoardChange() {
+      boardGen++; // фоновые загрузки старой доски станут «протухшими» и не применятся
+      plan = null; // план старой доски не должен попасть в виджеты новой
       mounted.forEach((m) => m.app.unmount());
       mounted.clear();
       statsBySprintId.clear();
@@ -816,7 +865,7 @@ export default defineContentScript({
       mark(`loaded:${statsBySprintId.size}`);
       renderAll();
       mark('rendered');
-      void loadMedian(); // медиана грузится фоном (N+1 запросов) — не блокирует основной рендер
+      void loadPlan(); // план грузится фоном (N+1 запросов) — не блокирует основной рендер
       void loadQuarter(); // квартальный баланс — тоже фоном
       void loadAging(); // возраст застревающих задач (changelog N+1) — фоном
     } catch (e) {
@@ -852,14 +901,8 @@ export default defineContentScript({
       // Смена доски (SPA-навигация между /boards/<X> и /boards/<Y>) — сброс и перезагрузка.
       const urlBoard = rapidViewIdFromUrl();
       if (urlBoard !== null && urlBoard !== currentBoardId) {
-        resetForBoardChange();
-        medianSp = null;
-        void loadData()
-          .then(renderAll)
-          .then(loadMedian)
-          .then(loadQuarter)
-          .then(loadAging)
-          .catch(() => {});
+        // Сброс и фоновые загрузки новой доски делает сам loadData (единая точка смены доски).
+        void loadData().catch(() => {});
         return;
       }
 
@@ -894,15 +937,14 @@ export default defineContentScript({
     boardConfig.watch(() => {
       dataFingerprint = ''; // другая доска — форсим перерисовку
       void refresh().then(renderAll);
-      void loadMedian();
+      void loadPlan();
       void loadQuarter();
       void loadAging();
     });
-    // Изменили N (сколько спринтов в историю) — пересчитать медиану и пороги возраста.
-    sprintHistoryCount.watch(() => {
-      void loadMedian();
-      void loadAging();
-    });
+    // Изменили N (сколько спринтов в историю) — пересчитать пороги возраста.
+    sprintHistoryCount.watch(() => void loadAging());
+    // Порог переноса задаёт цель выполнения — пересчитать план.
+    sprintHealthThresholds.watch(() => void loadPlan());
     // Квартальная цель / режим UI — перезагрузить квартальный баланс.
     quarterTarget.watch(() => void loadQuarter());
     quarterUiMode.watch(() => void loadQuarter());
