@@ -1,8 +1,6 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
 import type { QuarterBalance } from '@/core/domain';
-import { SPRINTS_PER_QUARTER } from '@/core/domain';
-import { sprintsRemaining } from '@/core/metrics';
 import { ADS } from './ads-tokens';
 import InfoTip from './InfoTip.vue';
 
@@ -27,20 +25,21 @@ const debtAbs = computed(() => Math.abs(props.balance.productDebtSp));
 const skewDir = computed(() => (props.balance.deltaPp > 0 ? 'Product' : 'остального'));
 const statusColor = computed(() => (props.balance.outOfBand ? T.danger : T.success));
 const sprintsLabel = computed(
-  () => `${props.balance.sprintsCounted} из ${SPRINTS_PER_QUARTER} спринтов`,
+  () =>
+    `${props.balance.sprintsCounted} из ${props.balance.sprintsCounted + props.balance.sprintsLeft} спринтов`,
 );
 
 // План активного спринта показываем, когда в активном спринте есть незавершённый объём
 // («взято, но не Done») — тогда есть что прогнозировать. Расхождение по кварталу может быть
 // малым, но факт/план активного спринта всё равно различаются — это и есть суть разделения.
-const planExtraSp = computed(() =>
-  +(props.balance.plannedTotal - props.balance.totalPoints).toFixed(1),
+const planExtraSp = computed(
+  () => +(props.balance.plannedTotal - props.balance.totalPoints).toFixed(1),
 );
 const showPlan = computed(() => props.balance.hasActive && planExtraSp.value >= 1);
 const planColor = computed(() => (props.balance.plannedOutOfBand ? T.danger : T.success));
 
 // Сколько спринтов квартала ещё осталось (0 = квартал на последнем спринте).
-const remaining = computed(() => sprintsRemaining(props.balance.sprintsCounted));
+const remaining = computed(() => props.balance.sprintsLeft);
 </script>
 
 <template>
@@ -161,8 +160,8 @@ const remaining = computed(() => sprintsRemaining(props.balance.sprintsCounted))
       <template v-if="balance.outOfBand && debtAbs > 0 && remaining > 0">
         Перекос в {{ skewDir }}: чтобы выйти на цель {{ targetPct }}%, нужно ≈
         <b :style="{ color: T.danger }">{{ debtAbs }} SP</b>
-        {{ balance.deltaPp > 0 ? 'на Tech/Support' : 'на Product' }} в оставшихся
-        {{ remaining }} {{ remaining === 1 ? 'спринте' : 'спринтах' }}.
+        {{ balance.deltaPp > 0 ? 'на Tech/Support' : 'на Product' }} в оставшихся {{ remaining }}
+        {{ remaining === 1 ? 'спринте' : 'спринтах' }}.
       </template>
       <template v-else-if="balance.outOfBand && debtAbs > 0">
         Квартал завершается: перекос в {{ skewDir }} на {{ deltaLabel }} (цель {{ targetPct }}%).
@@ -170,6 +169,5 @@ const remaining = computed(() => sprintsRemaining(props.balance.sprintsCounted))
       </template>
       <template v-else> Баланс в пределах цели ({{ targetPct }}% ±{{ bandPp }}%). </template>
     </div>
-
   </div>
 </template>

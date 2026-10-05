@@ -87,6 +87,39 @@ describe('getBoardSprintReportsSince — кеш и «Обновить»', () => 
   });
 });
 
+describe('getBoardSprintReportsSince — граница импорта: Q4 2025 целиком', () => {
+  it('ELCAS-25.9.2 (старт 24.09) входит в Q4 и в отчёт, 25.9.1 — нет', async () => {
+    const reported: string[] = [];
+    setJiraAuth(null);
+    setJiraTabTransport(async (path) => {
+      if (path.includes('/rest/agile/1.0/board/80/sprint')) {
+        // Январский спринт задаёт начало года команды: Q4 начинается через 36 недель, 24.09.
+        const values = [
+          { id: 1, name: 'ELCAS-25.1.1', state: 'closed', startDate: '2025-01-15T08:49:00Z' },
+          { id: 2, name: 'ELCAS-25.9.1', state: 'closed', startDate: '2025-09-11T08:00:00Z' },
+          { id: 3, name: 'ELCAS-25.9.2', state: 'closed', startDate: '2025-09-24T08:28:00Z' },
+        ];
+        return { ok: true, status: 200, body: JSON.stringify({ isLast: true, values }) };
+      }
+      reported.push(path);
+      const body = {
+        sprint: {
+          id: 3,
+          name: 'ELCAS-25.9.2',
+          state: 'CLOSED',
+          isoStartDate: '2025-09-24T08:28:00Z',
+        },
+        contents: {},
+      };
+      return { ok: true, status: 200, body: JSON.stringify(body) };
+    });
+    const r = await getBoardSprintReportsSince(80, '2025-10-01');
+    expect(r.sprints.map((s) => s.name)).toEqual(['ELCAS-25.9.2']);
+    expect(reported).toHaveLength(1);
+    expect(new Date(r.calendar.yearStarts[2025]).toISOString().slice(0, 10)).toBe('2025-01-15');
+  });
+});
+
 describe('getQuarterSprints — активный спринт в квартальном балансе', () => {
   it('запрашивает closed+active и отдаёт активный спринт с его закрытыми и взятыми SP', async () => {
     const calls: string[] = [];
@@ -95,6 +128,8 @@ describe('getQuarterSprints — активный спринт в квартал�
       calls.push(path);
       if (path.includes('/rest/agile/1.0/board/80/sprint')) {
         const values = [
+          // Январский спринт задаёт год команды: Q4 2026 начинается 23.09.
+          { id: 9, name: 'S0', state: 'closed', startDate: '2026-01-14T08:22:00Z' },
           { id: 1, name: 'S1', state: 'closed', startDate: '2026-09-09T10:00:00Z' },
           { id: 2, name: 'S2', state: 'active', startDate: '2026-09-23T10:00:00Z' },
         ];
@@ -120,9 +155,13 @@ describe('getQuarterSprints — активный спринт в квартал�
       return { ok: true, status: 200, body: JSON.stringify(body) };
     });
 
-    const records = await getQuarterSprints(80, 10);
+    const res = await getQuarterSprints(80);
+    const records = res!.sprints;
 
     expect(calls.find((c) => c.includes('/board/80/sprint'))).toContain('state=closed,active');
+    // S1 — последний спринт Q3, январский S0 — Q1: в баланс Q4 их отчёты не нужны.
+    expect(res!.quarter).toBe('2026-Q4');
+    expect(calls.some((c) => c.includes('sprintId=1') || c.includes('sprintId=9'))).toBe(false);
     const active = records.find((r) => r.state === 'ACTIVE');
     expect(active?.id).toBe(2);
     expect(active?.points.Product).toBe(3);

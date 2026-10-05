@@ -1,24 +1,25 @@
 import {
   DEFAULT_QUARTER_TARGET,
-  SPRINTS_PER_QUARTER,
   type CapBucket,
   type QuarterBalance,
   type QuarterId,
   type QuarterTarget,
   type SprintRecord,
+  type TeamCalendar,
 } from '@/core/domain';
+import { sprintsLeftInQuarter } from './team-quarter';
 
 /**
  * Квартальный capacity-баланс — ЧИСТЫЕ функции (тестируются без браузера).
  * Методология (см. память project_quarterly_capacity_methodology):
- *  - спринт относится к кварталу ПО ДАТЕ СТАРТА, целиком;
+ *  - спринт относится к кварталу команды по дате старта, целиком (team-quarter: 6-6-6-остаток);
  *  - знаменатель цели — КУМУЛЯТИВНЫЙ по кварталу;
  *  - цель 67/33 — коридор (target band ±bandPp), а не жёсткая квота;
- *  - квартал = 6 спринтов (для прогресса/прогноза остатка).
+ *  - сколько спринтов в квартале осталось — из календаря команды и её ритма.
  * Слой: core/metrics (DDD Domain Service).
  */
 
-/** Квартал даты по СТАРТУ (календарный, UTC). "2026-Q2". */
+/** Календарный квартал даты (UTC). "2026-Q2". Граница импорта отчёта задаётся так. */
 export function quarterOf(isoDate: string): QuarterId | null {
   const d = new Date(isoDate);
   if (Number.isNaN(d.getTime())) return null;
@@ -30,55 +31,6 @@ export function quarterOf(isoDate: string): QuarterId | null {
 export function nextQuarter(q: QuarterId): QuarterId {
   const [y, n] = q.split('-Q').map(Number);
   return n === 4 ? `${y + 1}-Q1` : `${y}-Q${n + 1}`;
-}
-
-/**
- * Отнести спринты ОДНОЙ команды к кварталам: по дате старта, но не больше SPRINTS_PER_QUARTER
- * спринтов в квартале — седьмой и дальше уходят в следующий квартал.
- *
- * Почему не чистый календарь: квартал команды = 6 двухнедельных спринтов, а 13 недель
- * календарного квартала вмещают 6.5. Спринт, стартующий в последнюю неделю квартала,
- * по календарю стал бы седьмым спринтом уходящего квартала, хотя это первый спринт нового
- * (живые данные: ELCAS-26.9.1 закрыт 23.09 — шестой в Q3, спринт со старта 23.09 — первый в Q4).
- * На всей истории с Q4 2025 правило даёт те же кварталы, что календарь: переносов не было.
- *
- * Спринт без валидной даты старта в результат не попадает.
- */
-export function assignQuarters<T>(
-  items: readonly T[],
-  startOf: (t: T) => string | undefined,
-): Map<T, QuarterId> {
-  const dated = items
-    .map((item) => ({ item, t: Date.parse(startOf(item) ?? '') }))
-    .filter((x) => !Number.isNaN(x.t))
-    .sort((a, b) => a.t - b.t);
-
-  const out = new Map<T, QuarterId>();
-  const count = new Map<QuarterId, number>();
-  let prev: QuarterId | null = null;
-  for (const { item, t } of dated) {
-    let q = quarterOf(new Date(t).toISOString())!;
-    // Квартал не может идти раньше квартала предыдущего спринта: если туда уже переносили,
-    // следующий спринт продолжает тот же квартал, а не возвращается в календарный.
-    if (prev && q < prev) q = prev;
-    while ((count.get(q) ?? 0) >= SPRINTS_PER_QUARTER) q = nextQuarter(q);
-    count.set(q, (count.get(q) ?? 0) + 1);
-    out.set(item, q);
-    prev = q;
-  }
-  return out;
-}
-
-/** Сгруппировать спринты одной доски по кварталу (см. assignQuarters). */
-export function groupByQuarter(sprints: SprintRecord[]): Map<QuarterId, SprintRecord[]> {
-  const map = new Map<QuarterId, SprintRecord[]>();
-  const quarterBy = assignQuarters(sprints, (x) => x.startDate);
-  for (const s of sprints) {
-    const q = quarterBy.get(s);
-    if (!q) continue;
-    (map.get(q) ?? map.set(q, []).get(q)!).push(s);
-  }
-  return map;
 }
 
 const factProduct = (s: SprintRecord) => s.points.Product;
@@ -97,6 +49,15 @@ const planTotal = (s: SprintRecord) => {
   const nd = s.notDonePoints;
   return factTotal(s) + nd.Product + nd.Tech + nd.Support + s.notDoneUnlabeled;
 };
+
+/** Сколько спринтов квартала ещё впереди — после самого свежего спринта, по ритму команды. */
+function lastSprintsLeft(sprints: readonly SprintRecord[], cal: TeamCalendar | undefined): number {
+  if (!cal || sprints.length === 0) return 0;
+  const last = sprints.reduce((a, s) =>
+    Date.parse(s.startDate) > Date.parse(a.startDate) ? s : a,
+  );
+  return sprintsLeftInQuarter(last.startDate, cal);
+}
 
 /** Один срез баланса (факт ИЛИ план): % Product, отклонение от цели, вне коридора, долг. */
 function deriveSlice(product: number, total: number, target: QuarterTarget) {
@@ -121,6 +82,8 @@ export function calcQuarterBalance(
   quarter: QuarterId,
   sprints: SprintRecord[],
   target: QuarterTarget = DEFAULT_QUARTER_TARGET,
+  /** Календарь команды — для «сколько спринтов квартала впереди». Без него 0. */
+  calendar?: TeamCalendar,
 ): QuarterBalance {
   const sum = (f: (s: SprintRecord) => number) => sprints.reduce((a, s) => a + f(s), 0);
   const fact = deriveSlice(sum(factProduct), sum(factTotal), target);
@@ -129,6 +92,7 @@ export function calcQuarterBalance(
   return {
     quarter,
     sprintsCounted: sprints.length,
+    sprintsLeft: lastSprintsLeft(sprints, calendar),
     hasActive: sprints.some((s) => s.state === 'ACTIVE'),
     totalPoints: fact.total,
     productPoints: +sum(factProduct).toFixed(1),
@@ -161,11 +125,6 @@ export function requiredProductPctForRemainder(
   const neededInRemainder = neededProductTotal - balance.productPoints;
   const pct = (neededInRemainder / forecastRemainingSp) * 100;
   return +Math.max(0, Math.min(100, pct)).toFixed(1);
-}
-
-/** Сколько спринтов квартала осталось (из 6). */
-export function sprintsRemaining(sprintsCounted: number): number {
-  return Math.max(0, SPRINTS_PER_QUARTER - sprintsCounted);
 }
 
 /** Бакеты «остального» (всё кроме Product) — для пояснений в UI. */
