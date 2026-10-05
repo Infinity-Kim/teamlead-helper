@@ -7,3 +7,4 @@ export * from './work-item-age';
 export * from './division-stats';
 export * from './sprint-completion';
 export * from './plan-capacity';
+export * from './team-quarter';

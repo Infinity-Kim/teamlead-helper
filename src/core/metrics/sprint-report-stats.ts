@@ -6,10 +6,11 @@ import {
   type QuarterId,
   type SprintReportDetail,
   type SprintReportIssue,
+  type TeamCalendar,
 } from '@/core/domain';
 import { splitPointsByBucket, type BucketPoints } from './cap-distribution';
 import { median } from './median';
-import { assignQuarters } from './quarter-balance';
+import { assignQuarters, teamCalendar } from './team-quarter';
 
 /**
  * Агрегаты для страницы «Отчёт по спринтам» — ЧИСТЫЕ функции (тестируются без браузера).
@@ -19,7 +20,7 @@ import { assignQuarters } from './quarter-balance';
  *  - CAP-раскладка спринта считается по completedIssues[] (labels + SP на закрытии);
  *  - несколько CAP-лейблов на задаче → SP делятся поровну (splitPointsByBucket);
  *  - проценты — от ВСЕГО completed, ВКЛЮЧАЯ Unlabeled (4 слайса = 100%);
- *  - спринт относится к кварталу по дате старта, целиком, не больше 6 спринтов (assignQuarters);
+ *  - спринт относится к кварталу команды по дате старта, целиком (team-quarter: 6-6-6-остаток);
  *  - average velocity = медиана И среднее последних N (по умолчанию 6) completedPoints.
  */
 
@@ -105,13 +106,16 @@ export interface QuarterGroup {
 }
 
 /**
- * Сгруппировать спринты одной команды по кварталу (assignQuarters). Спринт без валидной
- * даты старта пропускается. Кварталы возвращаются в хронологии от НОВЫХ к старым
+ * Сгруппировать спринты одной команды по кварталам её календаря (assignQuarters). Календарь
+ * по умолчанию строится из этих же спринтов. Спринт без даты старта пропускается. Кварталы возвращаются в хронологии от НОВЫХ к старым
  * (свежий квартал сверху). Внутри квартала спринты — как пришли (ожидается «свежие→старые»).
  */
-export function groupSprintsByQuarter(details: SprintReportDetail[]): QuarterGroup[] {
+export function groupSprintsByQuarter(
+  details: SprintReportDetail[],
+  calendar: TeamCalendar = teamCalendar(details.map((d) => d.isoStartDate)),
+): QuarterGroup[] {
   const map = new Map<QuarterId, SprintReportDetail[]>();
-  const quarterBy = assignQuarters(details, (d) => d.isoStartDate);
+  const quarterBy = assignQuarters(details, (d) => d.isoStartDate, calendar);
   for (const d of details) {
     const q = quarterBy.get(d);
     if (!q) continue;

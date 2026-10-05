@@ -20,9 +20,17 @@ import { median } from './median';
  * Считаем по каждому спринту, а не из агрегатов: закрытое и прилёты связаны (в спринт с большими
  * прилётами команда часто закрывает и больше), раздельные статистики эту связь рвут.
  *
- * ШАГ 2. Прогноз — нижний КВАНТИЛЬ допустимого плана следующего спринта (τ = 0.2: план
- * укладывается в цель примерно в 4 спринтах из 5). Медиана промахивалась бы в каждом втором
- * спринте, минимум ломается об один провальный спринт.
+ * ШАГ 2. Прогноз — нижний КВАНТИЛЬ допустимого плана следующего спринта (τ = 0.2: ориентир —
+ * в цель 4 спринта из 5). Медиана допустимого плана промахивалась бы в каждом втором спринте,
+ * минимум ломается об один провальный спринт.
+ *
+ * КАЛИБРОВКА (исследование 2026-10-05, живые данные ELCAS/POC/Web, честный бэктест): на деле
+ * смесь укладывается в цель в 71–74% спринтов, а не в 80% — она агрессивнее номинала (короткие
+ * окна и забывание дают завышенный квантиль), промахи идут сериями (тест Кристофферсена).
+ * Проверены альтернативы: Стьюдент по 18 спринтам (80%, план на ~3 SP меньше), Стьюдент с общим
+ * для команд разбросом (83–86%, pinball лучше), конформный квантиль, ACI, регрессия на число
+ * исполнителей. Решение тимлида: оставить смесь — больший план важнее, это вызов команде.
+ * Поэтому в интерфейсе — «план с вызовом» и фактическая частота попаданий, а не «4 из 5».
  *
  * ШАГ 3. Модель НЕ фиксирована — её подбирают данные команды. У команд меняются режимы
  * (ELCAS в 2025 закрывал 100–120 SP, в 2026 ~75; Web падал, потом вырос после найма), поэтому
@@ -55,6 +63,8 @@ import { median } from './median';
 
 /** Поток SP одного спринта, нужный для расчёта. */
 export interface SprintFlow {
+  /** Имя спринта — для подписей в разборе плана. */
+  name?: string;
   /** Закрыто SP (green bar Jira). */
   completed: number;
   /** SP задач, добавленных после старта и оставшихся в спринте к закрытию (закрытых или переехавших). */
@@ -102,7 +112,7 @@ export interface PlanModelWeight {
 }
 
 export interface PlanCapacity {
-  /** Сколько SP брать на старте: в цель ≈ 4 спринта из 5. */
+  /** Сколько SP брать на старте: план с вызовом (ориентир 4 из 5, на истории ≈ 3 из 4). */
   recommended: number;
   /** Амбициозный ориентир: в цель ≈ 7 спринтов из 10. Не меньше `recommended`. */
   stretch: number;
@@ -136,7 +146,7 @@ export function sprintFlow(s: SprintReportDetail): SprintFlow {
     seen.add(i.key);
     added += pts(i.points);
   }
-  return { completed: pts(s.completedPoints), added: round1(added) };
+  return { name: s.name, completed: pts(s.completedPoints), added: round1(added) };
 }
 
 /** Наибольший план на старте, при котором этот спринт уложился бы в цель выполнения. */
@@ -243,19 +253,33 @@ function pinball(actual: number, forecast: number, tau: number): number {
   return actual >= forecast ? tau * (actual - forecast) : (1 - tau) * (forecast - actual);
 }
 
-/** Веса кандидатов по их честным прогнозам последних HEDGE_LOOKBACK спринтов истории `h`. */
-function hedgeWeights(h: readonly number[]): number[] | null {
+/** Средняя ошибка (pinball) каждого кандидата на последних HEDGE_LOOKBACK спринтах `h`. */
+function candidateLosses(h: readonly number[]): number[] | null {
   const from = Math.max(MIN_HISTORY, h.length - HEDGE_LOOKBACK);
   if (h.length - from < MIN_SCORED) return null;
-  const losses = CANDIDATES.map(([, f]) => {
+  return CANDIDATES.map(([, f]) => {
     let sum = 0;
     for (let t = from; t < h.length; t++) sum += pinball(h[t], f(h.slice(0, t), TAU), TAU);
     return sum / (h.length - from);
   });
+}
+
+/** Веса кандидатов по их честным прогнозам последних HEDGE_LOOKBACK спринтов истории `h`. */
+function hedgeWeights(h: readonly number[]): number[] | null {
+  const losses = candidateLosses(h);
+  if (!losses) return null;
   const best = Math.min(...losses);
   const raw = losses.map((l) => Math.exp(-HEDGE_ETA * (l - best)));
   const total = raw.reduce((s, w) => s + w, 0);
   return raw.map((w) => w / total);
+}
+
+/** Прогноз τ-квантиля смесью кандидатов (или запасной моделью на короткой истории). */
+function mixtureForecast(allowed: readonly number[], tau: number): number {
+  const weights = hedgeWeights(allowed);
+  return weights
+    ? CANDIDATES.reduce((s, [, f], i) => s + weights[i] * f(allowed, tau), 0)
+    : FALLBACK(allowed, tau);
 }
 
 /**
@@ -272,10 +296,7 @@ export function planCapacity(
   const allowed = history.map((f) => allowedPlan(f, targetCompletion));
 
   const weights = hedgeWeights(allowed);
-  const forecast = (tau: number) =>
-    weights
-      ? CANDIDATES.reduce((s, [, f], i) => s + weights[i] * f(allowed, tau), 0)
-      : FALLBACK(allowed, tau);
+  const forecast = (tau: number) => mixtureForecast(allowed, tau);
 
   const trendSeries = allowed.slice(-TREND_WINDOW);
   let trend: PlanTrend | null = null;
@@ -309,12 +330,163 @@ export function planCapacity(
   };
 }
 
-/** Подсказка к плану — одна строка: насколько можно взять больше, если рискнуть. */
+/** Подсказка к плану: что значит число, как получено и насколько можно больше. */
 export function describePlan(p: PlanCapacity): string {
-  return `Можно чуть больше: ${p.stretch} SP`;
+  const target = Math.round(p.targetCompletion * 100);
+  const trend = p.trend?.active
+    ? `\nКоманда ${p.trend.slope > 0 ? 'растёт' : 'снижается'}: ≈ ${p.trend.slope > 0 ? '+' : ''}${p.trend.slope} SP за спринт.`
+    : '';
+  return (
+    `План на старт ≤ ${p.recommended} SP — столько брать, чтобы закрыть ≥ ${target}% взятого ` +
+    `с учётом прилётов. План с вызовом: на истории команд в цель ≈ 3 спринта из 4.\n` +
+    `Как: по каждому прошлому спринту допустимый план = закрыто ÷ ${p.targetCompletion} − прилёты; ` +
+    `берём нижние 20% этого ряда смесью моделей (${p.count} спринтов).${trend}\n` +
+    `Можно ещё больше: ${p.stretch} SP — риск переноса выше.`
+  );
 }
 
 /** Целевое выполнение из порога переноса: перенос ≤ 20% ⇔ выполнение ≥ 80%. */
 export function targetCompletionFromCarryover(carryoverPct: number): number {
   return Math.min(1, Math.max(0, 1 - carryoverPct / 100));
+}
+
+// --- Разбор плана: те же вычисления, но с промежуточными рядами — для страницы «как посчитано» ---
+
+/** Один прошлый спринт в разборе плана. */
+export interface PlanSprintRow {
+  name: string;
+  completed: number;
+  added: number;
+  /** Допустимый план: закрыто / цель − прилёты. */
+  allowed: number;
+}
+
+/** Кандидат смеси в разборе: прогноз, ошибка на истории, вес. */
+export interface PlanModelRow {
+  model: string;
+  /** Прогноз на следующий спринт, SP. */
+  forecast: number;
+  /** Средняя pinball-ошибка на последних спринтах, SP. */
+  loss: number;
+  weight: number;
+}
+
+/** Честная проверка на истории: каждый спринт прогнозируется только по спринтам до него. */
+export interface PlanBacktest {
+  /** Сколько спринтов проверено. */
+  scored: number;
+  /** В скольких из них рекомендованный план уложился бы в цель. */
+  hitsPlan: number;
+  /** То же для «медианы закрытого за 6 спринтов» — прежней velocity. */
+  hitsMedian: number;
+  /** По спринтам: имя, рекомендация, медиана velocity, допустимый план. */
+  rows: Array<{ name: string; plan: number; median: number; allowed: number }>;
+}
+
+export interface PlanExplanation {
+  plan: PlanCapacity;
+  /** История, по которой посчитан план (старые → свежие). */
+  sprints: PlanSprintRow[];
+  /** Медиана допустимого плана за всю историю — «типичный» спринт. */
+  medianAllowed: number;
+  /** Нижние 20% и 30% допустимого плана за всю историю (без смеси моделей) — для наглядности. */
+  q20: number;
+  q30: number;
+  backtest: PlanBacktest;
+  /** Ряд тренда (последние TREND_WINDOW) и линия Тейла–Сена по нему. null — истории мало. */
+  trendLine: { names: string[]; values: number[]; intercept: number; slope: number } | null;
+  /** Кандидаты в исходном порядке. Пусто — истории мало, работает запасная модель. */
+  models: PlanModelRow[];
+  /** Константы расчёта — чтобы текст страницы не расходился с кодом. */
+  constants: {
+    tau: number;
+    stretchTau: number;
+    hedgeLookback: number;
+    hedgeEta: number;
+    trendWindow: number;
+    trendZ: number;
+    velocityWindow: number;
+  };
+}
+
+/** Окно «прежней velocity» в проверке на истории. */
+const VELOCITY_WINDOW = 6;
+
+/**
+ * Разбор плана для страницы «как посчитано». Те же функции, что в planCapacity, плюс
+ * честная проверка на истории: для каждого из последних HEDGE_LOOKBACK спринтов план
+ * пересчитывается ТОЛЬКО по спринтам до него и сравнивается с его допустимым планом.
+ */
+export function explainPlan(
+  flows: readonly SprintFlow[],
+  targetCompletion: number,
+): PlanExplanation | null {
+  const plan = planCapacity(flows, targetCompletion);
+  if (!plan) return null;
+  const history = flows.slice(-PLAN_HISTORY);
+  const allowed = history.map((f) => allowedPlan(f, targetCompletion));
+  const names = history.map((f, i) => f.name ?? `#${i + 1}`);
+
+  const rows: PlanBacktest['rows'] = [];
+  for (let t = Math.max(MIN_HISTORY, history.length - HEDGE_LOOKBACK); t < history.length; t++) {
+    const before = allowed.slice(0, t);
+    rows.push({
+      name: names[t],
+      plan: Math.max(0, Math.floor(mixtureForecast(before, TAU) + 1e-9)),
+      median: round1(
+        median(history.slice(Math.max(0, t - VELOCITY_WINDOW), t).map((f) => f.completed))!,
+      ),
+      allowed: round1(allowed[t]),
+    });
+  }
+
+  const trendSeries = allowed.slice(-TREND_WINDOW);
+  const fit = trendSeries.length >= MIN_TREND_POINTS ? theilSen(trendSeries) : null;
+  const losses = candidateLosses(allowed);
+  const weights = hedgeWeights(allowed);
+
+  return {
+    plan,
+    sprints: history.map((f, i) => ({
+      name: names[i],
+      completed: f.completed,
+      added: f.added,
+      allowed: round1(allowed[i]),
+    })),
+    medianAllowed: round1(median(allowed)!),
+    q20: round1(lowerQuantile(allowed, TAU)),
+    q30: round1(lowerQuantile(allowed, STRETCH_TAU)),
+    backtest: {
+      scored: rows.length,
+      hitsPlan: rows.filter((r) => r.plan <= r.allowed).length,
+      hitsMedian: rows.filter((r) => r.median <= r.allowed).length,
+      rows,
+    },
+    trendLine: fit
+      ? {
+          names: names.slice(-TREND_WINDOW),
+          values: trendSeries.map(round1),
+          intercept: fit.intercept,
+          slope: fit.slope,
+        }
+      : null,
+    models:
+      losses && weights
+        ? CANDIDATES.map(([model, f], i) => ({
+            model,
+            forecast: round1(f(allowed, TAU)),
+            loss: round1(losses[i]),
+            weight: weights[i],
+          }))
+        : [],
+    constants: {
+      tau: TAU,
+      stretchTau: STRETCH_TAU,
+      hedgeLookback: HEDGE_LOOKBACK,
+      hedgeEta: HEDGE_ETA,
+      trendWindow: TREND_WINDOW,
+      trendZ: TREND_Z,
+      velocityWindow: VELOCITY_WINDOW,
+    },
+  };
 }

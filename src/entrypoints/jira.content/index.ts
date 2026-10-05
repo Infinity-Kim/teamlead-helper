@@ -17,7 +17,6 @@ import {
   targetCompletionFromCarryover,
   withHealthDefaults,
   type PlanCapacity,
-  groupByQuarter,
   calcQuarterBalance,
   ageThresholdsFromHistory,
   calcAgingIssues,
@@ -252,34 +251,25 @@ export default defineContentScript({
 
     /**
      * Загрузить квартальный баланс (того квартала, где активный спринт). N+1 запросов — фоном.
-     * Спринты относим к кварталу по ДАТЕ СТАРТА (методология). Считаем по completed-задачам.
+     * Квартал — по календарю команды (team-quarter: 6-6-6-остаток). Считаем по completed-задачам.
      */
     async function loadQuarter() {
       const gen = boardGen;
       try {
         const rapidViewId = await resolveRapidViewId();
-        // Берём с запасом (10) — покрыть текущий квартал (6) + границу.
-        const records = await getQuarterSprints(rapidViewId, 10);
+        // Только спринты текущего квартала команды — квартал считает api по всей истории доски.
+        const res = await getQuarterSprints(rapidViewId);
         const target = await quarterTarget.getValue();
         if (gen !== boardGen) return;
 
-        // Текущий квартал = квартал активного спринта (или самого свежего по старту). Квартал
-        // берём из группировки, а не из календаря: спринт со старта в конце квартала может
-        // оказаться первым спринтом следующего (см. assignQuarters).
-        const active = records.find((r) => r.state === 'ACTIVE') ?? records[0];
-        const byQ = groupByQuarter(records);
-        const curQuarter = active
-          ? ([...byQ].find(([, list]) => list.includes(active))?.[0] ?? null)
+        quarterBalance = res
+          ? calcQuarterBalance(
+              res.quarter,
+              res.sprints,
+              { productPct: target.productPct, bandPp: target.bandPp },
+              res.calendar,
+            )
           : null;
-        if (!curQuarter) {
-          quarterBalance = null;
-        } else {
-          const sprints = byQ.get(curQuarter) ?? [];
-          quarterBalance = calcQuarterBalance(curQuarter, sprints, {
-            productPct: target.productPct,
-            bandPp: target.bandPp,
-          });
-        }
         renderQuarterBlock();
       } catch (e) {
         console.warn('[TLH] loadQuarter failed:', e);

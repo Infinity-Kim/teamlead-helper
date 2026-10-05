@@ -1,13 +1,18 @@
 import type {
   BoardBacklog,
+  QuarterId,
   SprintRecord,
   SprintReportDetail,
   SprintReportsResult,
+  TeamCalendar,
 } from '@/core/domain';
 import {
   splitPointsByBucket,
   firstWorkStart,
   cycleTimeDays,
+  sprintQuarter,
+  teamCalendar,
+  quarterOf,
   type AgingIssue,
   type BucketPoints,
 } from '@/core/metrics';
@@ -87,7 +92,14 @@ async function fetchRecentSprintReports(
   const recent = all
     .sort((a, b) => Date.parse(b.startDate ?? '') - Date.parse(a.startDate ?? ''))
     .slice(0, Math.max(0, limit));
+  return fetchSprintReports(rapidViewId, recent);
+}
 
+/** sprintreport каждого спринта через пул конкурентности; упавшие считаются в `failed`. */
+async function fetchSprintReports(
+  rapidViewId: number,
+  recent: readonly GhSprint[],
+): Promise<SprintReportsFetch> {
   const settled = await mapWithConcurrency(recent, currentConcurrency(), (sprint) =>
     jiraGetJsonRetry<GhSprintReportDto>(endpoints.sprintReport(rapidViewId, sprint.id)),
   );
@@ -115,8 +127,14 @@ export async function getBoardBacklog(rapidViewId: number): Promise<BoardBacklog
 }
 
 /**
- * Спринты для квартального баланса: последние `limit` спринтов (ЗАКРЫТЫЕ + АКТИВНЫЙ) с датой
- * старта и распределением completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
+ * Спринты ТЕКУЩЕГО квартала для квартального баланса (ЗАКРЫТЫЕ + АКТИВНЫЙ) с распределением
+ * completed SP по CAP-бакетам. Deep module (Agile API + sprintreport каждого).
+ *
+ * Текущий квартал — квартал активного спринта (без него — самого свежего) в календаре команды,
+ * построенном по ВСЕЙ истории доски (team-quarter: 6-6-6-остаток). Квартал отдаётся наружу:
+ * по одним спринтам квартала его не вычислить — в них нет январского спринта.
+ * Отбор по датам из списка спринтов, а не «последние N»: N под одну длину спринта не подходит
+ * другой, а лишние отчёты — лишние запросы.
  *
  * Активный нужен обязательно: без него факт квартала не видит закрытое в текущем спринте, «план»
  * не считается, а на стыке кварталов бар показывает прошлый квартал вместо текущего.
@@ -124,13 +142,23 @@ export async function getBoardBacklog(rapidViewId: number): Promise<BoardBacklog
  * Бакеты считаются по completedIssues[] отчёта (labels + currentEstimateStatistic = SP на закрытии).
  * У активного спринта completedIssues = уже закрытые в нём задачи (план в работе).
  */
-export async function getQuarterSprints(
-  rapidViewId: number,
-  limit: number,
-): Promise<SprintRecord[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, limit, 'closed,active');
+export async function getQuarterSprints(rapidViewId: number): Promise<QuarterSprints | null> {
+  const all = await fetchBoardSprints(rapidViewId, 'closed,active');
+  const calendar = teamCalendar(all.map((s) => s.startDate));
+  const current =
+    all.find((s) => s.state?.toLowerCase() === 'active') ??
+    all.reduce<GhSprint | undefined>(
+      (a, s) => (!a || Date.parse(s.startDate ?? '') > Date.parse(a.startDate ?? '') ? s : a),
+      undefined,
+    );
+  const quarter = current ? sprintQuarter(current.startDate, calendar) : null;
+  if (!quarter) return null;
+  const { ok } = await fetchSprintReports(
+    rapidViewId,
+    all.filter((s) => sprintQuarter(s.startDate, calendar) === quarter),
+  );
 
-  return ok
+  const sprints = ok
     .map(({ sprint, report }): SprintRecord => {
       // ACL только раскладывает сырьё по бакетам (SP на закрытии = currentEstimate); решение
       // «что из notDone считать планом» принимает core/metrics по state — здесь без интерпретации.
@@ -139,7 +167,7 @@ export async function getQuarterSprints(
       return {
         id: sprint.id,
         name: sprint.name,
-        startDate: report.sprint?.isoStartDate ?? '',
+        startDate: report.sprint?.isoStartDate ?? sprint.startDate ?? '',
         // Agile API отдаёт state строчными ("closed") — нормализатор ждёт заглавные.
         state: normalizeSprintState(sprint.state?.toUpperCase()),
         points: { Product: done.Product, Tech: done.Tech, Support: done.Support },
@@ -149,6 +177,14 @@ export async function getQuarterSprints(
       };
     })
     .filter((r) => r.startDate !== '');
+  return { quarter, calendar, sprints };
+}
+
+/** Спринты текущего квартала + сам квартал и календарь команды (для «сколько осталось»). */
+export interface QuarterSprints {
+  quarter: QuarterId;
+  calendar: TeamCalendar;
+  sprints: SprintRecord[];
 }
 
 /** Переходы статусов одной задачи через changelog (или [] при ошибке — не роняем весь расчёт). */
@@ -253,10 +289,10 @@ function bucketizeReport(issues: GhSprintReportDto['contents']['completedIssues'
 }
 
 /**
- * ВСЕ закрытые спринты доски со стартом ≥ `sinceIso` (без обрезки до N) — для страницы
- * «Отчёт по спринтам» с квартальной группировкой. Порядок: от свежих к старым (по sequence).
- * Фильтр по дате — на domain-объекте (isoStartDate), т.к. sprintquery дат не отдаёт, они
- * приходят в sprintreport. Спринт без валидной isoStartDate отбрасывается (нельзя отнести к кварталу).
+ * ВСЕ закрытые спринты доски с квартала, куда попадает `sinceIso`, ЦЕЛИКОМ (без обрезки до N) —
+ * для страницы «Отчёт по спринтам». Порядок: от свежих к старым. Квартал — по календарю
+ * команды из всей истории доски (team-quarter): с '2025-10-01' это весь Q4 2025, включая ГГ.9.2
+ * со стартом 24.09. Спринт без даты старта отбрасывается.
  *
  * N+1 запросов идут через ПУЛ конкурентности (не Promise.all по всем) + ретрай с Retry-After —
  * чтобы не пробивать burst-лимит Jira и не терять спринты на случайных 429. Число НЕзагруженных
@@ -268,12 +304,15 @@ export async function getBoardSprintReportsSince(
   cached: ReadonlyMap<number, SprintReportDetail> = new Map(),
   refetch = false,
 ): Promise<SprintReportsResult> {
-  const since = Date.parse(sinceIso);
+  const sinceQuarter = quarterOf(sinceIso);
 
-  // 1) Список спринтов С ДАТАМИ — 2 запроса вместо 83 (Agile API отдаёт startDate в списке).
-  const wanted = (await fetchBoardSprints(rapidViewId)).filter((s) => {
-    const t = Date.parse(s.startDate ?? '');
-    return !Number.isNaN(t) && t >= since;
+  // 1) Список спринтов С ДАТАМИ — 2 запроса вместо 83 (Agile API отдаёт даты в списке).
+  //    Календарь — по всем спринтам доски: январские спринты прошлых лет задают начало года.
+  const all = await fetchBoardSprints(rapidViewId);
+  const calendar = teamCalendar(all.map((s) => s.startDate));
+  const wanted = all.filter((s) => {
+    const q = sprintQuarter(s.startDate, calendar);
+    return q !== null && sinceQuarter !== null && q >= sinceQuarter;
   });
 
   // 2) Обычно тянем только спринты, которых нет в кеше. refetch — все: метки и оценки задач
@@ -302,7 +341,7 @@ export async function getBoardSprintReportsSince(
     .filter((d): d is SprintReportDetail => d !== undefined)
     .sort((a, b) => Date.parse(b.isoStartDate ?? '') - Date.parse(a.isoStartDate ?? ''));
 
-  return { sprints, failed, fetched };
+  return { sprints, failed, fetched, calendar };
 }
 
 export { setJiraAuth, setJiraTabTransport, hasJiraAccess } from './client';

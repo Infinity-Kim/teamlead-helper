@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { SprintReportDetail, SprintReportIssue } from '@/core/domain';
 import {
   allowedPlan,
+  explainPlan,
   lowerQuantile,
   mannKendallZ,
   planCapacity,
@@ -242,7 +243,7 @@ describe('sprintFlow', () => {
       puntedIssues: [issue('A-4', 20)],
       addedIssueKeys: new Set(['A-2', 'A-3', 'A-4']),
     });
-    expect(sprintFlow(s)).toEqual({ completed: 13, added: 11 });
+    expect(sprintFlow(s)).toEqual({ name: 'S', completed: 13, added: 11 });
   });
 
   it('задача в двух массивах учитывается один раз, null-оценка → 0', () => {
@@ -258,5 +259,41 @@ describe('sprintFlow', () => {
 describe('targetCompletionFromCarryover', () => {
   it('перенос 20% ⇔ выполнение 80%', () => {
     expect(targetCompletionFromCarryover(20)).toBeCloseTo(0.8);
+  });
+});
+
+describe('explainPlan — разбор плана для страницы «как посчитано»', () => {
+  const flows = flowsOf('ELCAS');
+  const e = explainPlan(flows, 0.8)!;
+
+  it('итог совпадает с planCapacity — страница не считает своё', () => {
+    expect(e.plan).toEqual(planCapacity(flows, 0.8));
+  });
+
+  it('допустимый план каждого спринта = закрыто / цель − прилёты', () => {
+    expect(e.sprints).toHaveLength(flows.length);
+    expect(e.sprints[0]).toMatchObject({ completed: 75, added: 4, allowed: 89.8 });
+  });
+
+  it('проверка на истории — до 18 последних спринтов, каждый по данным до него', () => {
+    // 24 спринта: первые 8 — разгон истории, проверяются 16.
+    expect(e.backtest.scored).toBe(16);
+    expect(e.backtest.hitsPlan).toBe(e.backtest.rows.filter((r) => r.plan <= r.allowed).length);
+    expect(e.backtest.hitsMedian).toBe(e.backtest.rows.filter((r) => r.median <= r.allowed).length);
+    // Живые данные ELCAS: рекомендация в цели 11 из 16, медиана закрытого — 12 из 16
+    // (POC 12 против 9, Web 12 против 11). Страница показывает это как есть.
+    expect([e.backtest.hitsPlan, e.backtest.hitsMedian]).toEqual([11, 12]);
+  });
+
+  it('веса моделей в сумме 1, у каждой есть прогноз и ошибка', () => {
+    expect(e.models).toHaveLength(11);
+    expect(e.models.reduce((s, m) => s + m.weight, 0)).toBeCloseTo(1, 9);
+    expect(e.models.every((m) => m.loss >= 0 && m.forecast > 0)).toBe(true);
+  });
+
+  it('линия тренда — по последним 12 спринтам; короткая история — без неё', () => {
+    expect(e.trendLine?.values).toHaveLength(12);
+    expect(explainPlan(flows.slice(0, 5), 0.8)!.trendLine).toBeNull();
+    expect(explainPlan([], 0.8)).toBeNull();
   });
 });

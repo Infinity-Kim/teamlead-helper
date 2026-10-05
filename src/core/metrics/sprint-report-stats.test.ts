@@ -76,18 +76,29 @@ describe('aggregateCapBreakdown', () => {
   });
 });
 
-describe('groupSprintsByQuarter (по дате СТАРТА)', () => {
-  it('спринт, стартовавший в конце квартала, идёт в квартал СТАРТА, даже если закрылся в следующем', () => {
-    // старт 30 марта (Q1), закрытие в апреле (Q2) → должен попасть в 2025-Q1
-    const s = sprint({
+describe('groupSprintsByQuarter (календарь команды)', () => {
+  it('ГГ.9.2 (старт 24.09) — первый спринт Q4, если год команды начался 15.01', () => {
+    const jan = sprint({
       sprintId: 1,
-      isoStartDate: '2025-03-30T10:00:00+0000',
-      isoCompleteDate: '2025-04-10T10:00:00+0000',
+      isoStartDate: '2025-01-15T09:00:00+0000',
+      completedIssues: [],
+    });
+    const s91 = sprint({
+      sprintId: 2,
+      isoStartDate: '2025-09-10T09:00:00+0000',
+      completedIssues: [],
+    });
+    const s92 = sprint({
+      sprintId: 3,
+      isoStartDate: '2025-09-24T09:00:00+0000',
       completedIssues: [issue('A', 10, ['CAP_Product'])],
     });
-    const groups = groupSprintsByQuarter([s]);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].quarter).toBe('2025-Q1');
+    const groups = groupSprintsByQuarter([s92, s91, jan]);
+    expect(groups.map((g) => [g.quarter, g.sprints.map((d) => d.sprintId)])).toEqual([
+      ['2025-Q4', [3]],
+      ['2025-Q3', [2]],
+      ['2025-Q1', [1]],
+    ]);
   });
 
   it('группирует по кварталам и сортирует от новых к старым', () => {
@@ -112,7 +123,7 @@ describe('groupSprintsByQuarter (по дате СТАРТА)', () => {
     expect(groups.find((g) => g.quarter === '2025-Q2')!.completedSp).toBe(20);
   });
 
-  it('спринт без даты старта пропускается', () => {
+  it('спринт без дат пропускается', () => {
     const s = sprint({ sprintId: 1, completedIssues: [issue('A', 10)] }); // нет isoStartDate
     expect(groupSprintsByQuarter([s])).toHaveLength(0);
   });
@@ -159,7 +170,9 @@ describe('velocitySummary (median + mean, окно 6)', () => {
   });
 
   it('меньше окна — берёт что есть', () => {
-    const sprints = [30, 10].map((p, i) => sprint({ sprintId: i, completedIssues: [issue('A', p)] }));
+    const sprints = [30, 10].map((p, i) =>
+      sprint({ sprintId: i, completedIssues: [issue('A', p)] }),
+    );
     const v = velocitySummary(sprints, 6);
     expect(v.count).toBe(2);
     expect(v.mean).toBe(20);

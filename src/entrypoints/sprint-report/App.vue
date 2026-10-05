@@ -20,13 +20,13 @@ import {
 } from '@/shared/storage';
 import {
   divisionTeams,
-  SPRINTS_PER_QUARTER,
   CAP_LABELS_SINCE_ISO,
   type CapSlice,
   type Division,
   type SprintReportDetail,
   type SprintReportIssue,
   type TeamBoard,
+  type TeamCalendar,
 } from '@/core/domain';
 import {
   groupSprintsByQuarter,
@@ -36,10 +36,9 @@ import {
   sprintFlow,
   type SprintFlow,
   describePlan,
+  explainPlan,
   issueInSlice,
   healthBySprint,
-  healthSummary,
-  healthVerdict,
   toThresholds,
   withHealthColorDefaults,
   DEFAULT_HEALTH_COLORS,
@@ -58,10 +57,10 @@ import {
   type HealthThresholds,
   type RuleId,
   type RuleResult,
-  type RuleSummary,
 } from '@/core/metrics';
 import { BUCKET_COLORS } from '@/components/ads-tokens';
 import HealthChips from '@/components/HealthChips.vue';
+import PlanExplain from '@/components/PlanExplain.vue';
 import { levelStyle, type HealthLevel } from '@/components/health-tone';
 
 /** Окно для average velocity. */
@@ -74,6 +73,8 @@ interface TeamReport {
   team: string;
   rapidViewId: number;
   sprints: SprintReportDetail[];
+  /** Календарь команды по всей истории доски — по нему спринты относятся к кварталам. */
+  calendar: TeamCalendar;
   quarters: QuarterGroup[];
   velocity: VelocitySummary;
   /** История для модели плана: спринты отчёта, старые → свежие. */
@@ -85,8 +86,6 @@ interface TeamReport {
   failed: number;
   /** Правила здоровья по каждому спринту. */
   health: Map<number, RuleResult[]>;
-  /** Сводка правил за последние VELOCITY_WINDOW спринтов — для шапки. */
-  healthSummary: RuleSummary[];
 }
 
 /** Кеш готовых отчётов по команде В ПАМЯТИ страницы — мгновенное переключение между командами. */
@@ -125,9 +124,9 @@ function planFor(flows: readonly SprintFlow[], t: HealthThresholds): PlanCapacit
   return planCapacity(flows, 1 - t.carryover);
 }
 
-/** Расшифровка плана для подсказки — общий текст с бэклогом. */
+/** Расшифровка плана для подсказки — общий текст с бэклогом + куда смотреть подробнее. */
 function planTitle(p: PlanCapacity): string {
-  return describePlan(p);
+  return `${describePlan(p)}\n\nПодробно, с графиками и формулами — «как посчитано →».`;
 }
 
 /** Собрать TeamReport из сырья спринтов. */
@@ -136,20 +135,21 @@ function buildReport(
   sprints: SprintReportDetail[],
   failed: number,
   planFlows: SprintFlow[],
+  calendar: TeamCalendar,
 ): TeamReport {
   const t = thresholds.value;
   return {
     team: team.name,
     rapidViewId: team.rapidViewId,
     sprints,
-    quarters: groupSprintsByQuarter(sprints),
+    calendar,
+    quarters: groupSprintsByQuarter(sprints, calendar),
     velocity: velocitySummary(sprints, VELOCITY_WINDOW),
     planFlows,
     plan: t ? planFor(planFlows, t) : null,
     sprintCount: sprints.length,
     failed,
     health: t ? healthBySprint(sprints, t) : new Map(),
-    healthSummary: t ? healthSummary(sprints, t, VELOCITY_WINDOW) : [],
   };
 }
 
@@ -191,6 +191,22 @@ const view = ref<'division' | number>('division');
 
 /** Отчёт по ВЫБРАННОЙ команде (грузим только её — не тянем лишнее). */
 const report = ref<TeamReport | null>(null);
+
+/** Открыт разбор плана (#…&explain=plan) — вместо отчёта команды показываем PlanExplain. */
+const explain = ref(false);
+
+/** Ссылка на разбор плана текущей команды (открывается в новой вкладке). */
+const explainHref = computed(() =>
+  view.value === 'division'
+    ? '#'
+    : `#division=${encodeURIComponent(selectedDivisionId.value)}&team=${view.value}&explain=plan`,
+);
+
+const planExplanation = computed(() => {
+  const r = report.value;
+  const t = thresholds.value;
+  return explain.value && r && t ? explainPlan(r.planFlows, 1 - t.carryover) : null;
+});
 /** Сводка выбранного дивизиона по кварталам. */
 const division = ref<{ quarters: DivisionQuarter[]; failed: number } | null>(null);
 
@@ -294,7 +310,7 @@ async function ensureAccess(): Promise<boolean> {
 async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
   const mem = fresh ? undefined : memCache.get(team.rapidViewId);
   if (mem) return mem;
-  const { sprints, failed, fetched } = await getBoardSprintReportsSince(
+  const { sprints, failed, fetched, calendar } = await getBoardSprintReportsSince(
     team.rapidViewId,
     CAP_LABELS_SINCE_ISO,
     await readSprintCache(),
@@ -302,7 +318,7 @@ async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
   );
   await writeSprintCache(fetched);
   // План — по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии.
-  const built = buildReport(team, sprints, failed, sprints.map(sprintFlow).reverse());
+  const built = buildReport(team, sprints, failed, sprints.map(sprintFlow).reverse(), calendar);
   memCache.set(team.rapidViewId, built);
   return built;
 }
@@ -342,7 +358,12 @@ async function load(force = false) {
     if (v === 'division') {
       division.value = {
         quarters: divisionQuarters(
-          reports.map((r) => ({ rapidViewId: r.rapidViewId, team: r.team, sprints: r.sprints })),
+          reports.map((r) => ({
+            rapidViewId: r.rapidViewId,
+            team: r.team,
+            sprints: r.sprints,
+            calendar: r.calendar,
+          })),
         ),
         failed: reports.reduce((s, r) => s + r.failed, 0),
       };
@@ -385,7 +406,8 @@ function refresh() {
 
 /** Выбор и адрес запоминаем в hash — ссылку на вид дивизиона/команды можно переслать. */
 function writeHash() {
-  const team = view.value === 'division' ? '' : `&team=${view.value}`;
+  const team =
+    view.value === 'division' ? '' : `&team=${view.value}${explain.value ? '&explain=plan' : ''}`;
   history.replaceState(
     null,
     '',
@@ -394,16 +416,24 @@ function writeHash() {
 }
 
 function selectView(v: 'division' | number) {
-  if (loading.value || v === view.value) return;
+  if (loading.value || (v === view.value && !explain.value)) return;
+  explain.value = false;
   view.value = v;
   writeHash();
   void load();
+}
+
+/** Вернуться из разбора плана к отчёту команды. */
+function closeExplain() {
+  explain.value = false;
+  writeHash();
 }
 
 function selectDivision(id: string) {
   if (loading.value || id === selectedDivisionId.value) return;
   selectedDivisionId.value = id;
   view.value = 'division';
+  explain.value = false;
   writeHash();
   void load();
 }
@@ -420,7 +450,10 @@ onMounted(async () => {
   const wanted = divisionOptions.value.find((d) => d.id === hash.get('division'));
   selectedDivisionId.value = (wanted ?? divisionOptions.value[0])?.id ?? '';
   const teamId = Number(hash.get('team'));
-  if (currentTeams.value.some((t) => t.rapidViewId === teamId)) view.value = teamId;
+  if (currentTeams.value.some((t) => t.rapidViewId === teamId)) {
+    view.value = teamId;
+    explain.value = hash.get('explain') === 'plan';
+  }
   await load();
 });
 
@@ -455,7 +488,6 @@ sprintHealthThresholds.watch((v) => {
   const rehealth = (r: TeamReport): TeamReport => ({
     ...r,
     health: healthBySprint(r.sprints, t),
-    healthSummary: healthSummary(r.sprints, t, VELOCITY_WINDOW),
     plan: planFor(r.planFlows, t),
   });
   for (const [id, r] of memCache) memCache.set(id, rehealth(r));
@@ -465,14 +497,14 @@ sprintHealthThresholds.watch((v) => {
 // --- Сводка дивизиона ---
 
 /**
- * Идёт ли квартал: это самый свежий квартал сводки, и у какой-то команды в нём меньше
- * SPRINTS_PER_QUARTER закрытых спринтов. Не по календарю: квартал команды — 6 спринтов, и он
- * заканчивается раньше календарного (см. assignQuarters).
+ * Идёт ли квартал: это самый свежий квартал сводки, и у какой-то команды после последнего
+ * закрытого спринта в нём закончится ещё хотя бы один (по длине её спринта). Не «меньше 6»:
+ * в квартале 6 или 7 спринтов (52 недели — не 48), у команд с другой длиной спринта — иначе.
  */
 function inProgress(q: DivisionQuarter): boolean {
   return (
     q.quarter === division.value?.quarters[0]?.quarter &&
-    q.teams.some((t) => t.sprintCount < SPRINTS_PER_QUARTER)
+    q.teams.some((t) => t.sprintCount > 0 && t.sprintsLeft > 0)
   );
 }
 
@@ -572,134 +604,9 @@ function contribution(e: { points: number; from?: number | null; to?: number }):
   return `${fmtNum(e.points)} SP`;
 }
 
-/** Короткие имена правил для сводки в шапке. */
-const SUMMARY_LABEL: Record<RuleId, string> = {
-  'velocity-drop': 'Скорость',
-  carryover: 'Перенос',
-  reestimate: 'Переоценка',
-  'scope-added': 'Добавлено',
-  punted: 'Выброшено',
-};
-
-/** Проценты сводки: до 1 знака при малых значениях, иначе целые (7.3% против «7%»). */
-function fmtPct(v: number | null): string {
-  if (v === null) return '—';
-  const abs = Math.abs(v) * 100;
-  return (abs < 10 ? abs.toFixed(1) : abs.toFixed(0)) + '%';
-}
-
-/** Значение правила в сводке: перенос/скорость — в %, выброшенные — в задачах. */
-function summaryValue(rs: RuleSummary): string {
-  if (rs.typical === null) return '—';
-  return rs.rule === 'punted' ? `${fmtNum(rs.typical)} зад.` : fmtPct(rs.typical);
-}
-
-/** Пороги правила в сводке: «20% / 30%» или «0 / 3 зад.» — жёлтый / красный. */
-function summaryLimits(rs: RuleSummary): string {
-  return rs.rule === 'punted'
-    ? `${fmtNum(rs.threshold)} / ${fmtNum(rs.critThreshold)} зад.`
-    : `${fmtPct(rs.threshold)} / ${fmtPct(rs.critThreshold)}`;
-}
-
 /** Стиль цвета уровня из настроек; fill — насыщенность заливки в %. */
 function toneOf(level: HealthLevel, fill?: number) {
   return levelStyle(healthColors.value[level], fill);
-}
-
-/** Главный вывод по окну: что чинить, почему и что уже наладилось. */
-const verdict = computed(() => (report.value ? healthVerdict(report.value.healthSummary) : null));
-
-/**
- * Формулировка проблемы человеческим языком. Опирается на причинно-следственную модель
- * Cohn: перенос — следствие, а «взяли больше», «вбросы», «рост оценок» — его причины.
- */
-const verdictText = computed(() => {
-  const v = verdict.value;
-  if (!v) return null;
-  if (!v.focus) {
-    return { headline: 'Спринты идут в пределах ориентиров', detail: '' };
-  }
-  const f = v.focus;
-
-  const HEAD: Record<RuleId, string> = {
-    carryover: `Команда берёт больше, чем закрывает: ${summaryValue(f)} работы уезжает в следующий спринт`,
-    'velocity-drop': `Скорость держится ниже привычной: типично на ${summaryValue(f)} меньше медианы предыдущих спринтов`,
-    reestimate: `Оценки растут уже в спринте: в среднем на ${summaryValue(f)} от взятого объёма`,
-    'scope-added': `В спринт добавляют работу после старта: ${summaryValue(f)} сверх плана`,
-    punted: `Из спринтов убирают задачи после старта: ${summaryValue(f)} за спринт`,
-  };
-  const CAUSE: Partial<Record<RuleId, string>> = {
-    'velocity-drop': 'берут больше, чем обычно успевают',
-    'scope-added': 'в спринт добавляют работу после старта',
-    reestimate: 'задачи оказываются объёмнее, чем оценили',
-  };
-
-  // «4 спринта из 6» — склонение по числу, иначе получается «в 4 спринтов из 6 спринтов».
-  const plural = (n: number) => {
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    if (mod10 === 1 && mod100 !== 11) return 'спринте';
-    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'спринтах';
-    return 'спринтах';
-  };
-  const crit = f.critCount > 0 ? ` (в ${f.critCount} — за красным порогом)` : '';
-  const parts: string[] = [
-    `Так в ${f.warnCount} ${plural(f.warnCount)} из ${f.evaluated}${crit}${v.chronic ? ' — это уже привычка, а не случайность' : ''}. Пороги — ${summaryLimits(f)}.`,
-  ];
-  if (v.cause && CAUSE[v.cause.rule]) {
-    parts.push(`Вероятная причина: ${CAUSE[v.cause.rule]} (${summaryValue(v.cause)}).`);
-  }
-  if (v.worsening) parts.push('В последних спринтах стало заметнее.');
-  return { headline: HEAD[f.rule], detail: parts.join(' ') };
-});
-
-/** «Что наладилось» — короткие фразы вида «вбросов стало меньше: 14% → 2%». */
-const improvedText = computed(() => {
-  const IMPROVED: Record<RuleId, string> = {
-    carryover: 'переносить стали меньше',
-    'velocity-drop': 'скорость выровнялась',
-    reestimate: 'оценки стали точнее',
-    'scope-added': 'реже добавляют работу после старта',
-    punted: 'перестали убирать задачи из спринта',
-  };
-  // Для «выброшено» единица — задачи, и дробное «0.3 задачи» бессмысленно: округляем.
-  const fmtBy = (rule: RuleId, v: number | null) =>
-    rule === 'punted' ? String(Math.round(v ?? 0)) : fmtPct(v);
-  return (
-    (verdict.value?.improved ?? [])
-      .map((s) => ({
-        rule: s.rule,
-        text: IMPROVED[s.rule],
-        from: fmtBy(s.rule, s.olderAvg),
-        to: fmtBy(s.rule, s.recentAvg),
-      }))
-      // Если после округления «было» и «стало» совпали, улучшение не читается — не показываем.
-      .filter((s) => s.from !== s.to)
-  );
-});
-
-/** Направление словом + «хорошо ли это» для конкретного правила (рост всех пяти — плохо). */
-function directionNote(rs: RuleSummary): { arrow: string; word: string; good: boolean } | null {
-  // Значение уже на нуле — «снижается» бессмысленно (снижаться некуда).
-  if (rs.typical === 0 && rs.direction === 'down') {
-    return { arrow: '', word: 'нет', good: true };
-  }
-  if (!rs.direction || rs.direction === 'flat') {
-    return rs.direction === 'flat' ? { arrow: '→', word: 'ровно', good: true } : null;
-  }
-  const up = rs.direction === 'up';
-  return { arrow: up ? '↑' : '↓', word: up ? 'растёт' : 'снижается', good: !up };
-}
-
-/** Пояснение к строке сводки: типичное значение, ориентир, динамика. */
-function summaryHint(rs: RuleSummary): string {
-  if (rs.evaluated === 0) {
-    return `${SUMMARY_LABEL[rs.rule]}: нет спринтов, для которых правило можно посчитать (мало истории или Jira не отдала данные)`;
-  }
-  const base = `${SUMMARY_LABEL[rs.rule]}: типично ${summaryValue(rs)} при порогах ${summaryLimits(rs)} (жёлтый / красный). За первым порогом ${rs.warnCount} из ${rs.evaluated} спринтов, из них за вторым — ${rs.critCount}.`;
-  if (rs.olderAvg === null || rs.recentAvg === null) return base;
-  const fmt = rs.rule === 'punted' ? fmtNum : fmtPct;
-  return `${base} Первая половина окна ${fmt(rs.olderAvg)} → вторая ${fmt(rs.recentAvg)}.`;
 }
 
 /** Человекочитаемые имена правил — для подписи раскрытого списка. */
@@ -968,7 +875,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
               <span
                 v-if="inProgress(q)"
                 class="rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                :title="`Квартал ещё идёт: закрыто меньше ${SPRINTS_PER_QUARTER} спринтов хотя бы у одной команды. Учтены только закрытые спринты.`"
+                :title="`Квартал ещё идёт: хотя бы у одной команды впереди спринты, которые закончатся в этом квартале. Учтены только закрытые спринты.`"
               >
                 идёт
               </span>
@@ -1010,7 +917,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
               v-if="q.quarter === division?.quarters[0]?.quarter && !inProgress(q)"
               class="-mt-1 mb-2 text-[11px] text-slate-400"
             >
-              Все {{ SPRINTS_PER_QUARTER }} спринтов квартала закрыты.
+              Все спринты квартала закрыты.
               {{ quarterLabel(nextQuarter(q.quarter)) }}
               появится здесь, когда закроется его первый спринт — в отчёт попадают только закрытые.
             </p>
@@ -1164,6 +1071,18 @@ const CAP_SLICES_ALL = CAP_SLICES;
         Нет закрытых спринтов с Q4 2025 у этой команды.
       </div>
 
+      <!-- Разбор плана команды (#…&explain=plan) -->
+      <div v-else-if="explain && planExplanation" class="mx-auto max-w-4xl space-y-4">
+        <a
+          href="#"
+          class="text-xs text-[#1558bc] hover:underline dark:text-[#669df1]"
+          @click.prevent="closeExplain"
+        >
+          ← к отчёту {{ report.team }}
+        </a>
+        <PlanExplain :team="report.team" :e="planExplanation" />
+      </div>
+
       <!-- Отчёт выбранной команды -->
       <div v-else class="space-y-6">
         <section>
@@ -1191,95 +1110,20 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     {{ report.plan.trend.slope > 0 ? '↗' : '↘' }}
                   </template>
                   · вызов {{ report.plan.stretch }}
+                  ·
+                  <a
+                    :href="explainHref"
+                    target="_blank"
+                    class="text-[#1558bc] hover:underline dark:text-[#669df1]"
+                    title="Разбор плана по шагам: формулы, графики, проверка на истории команды"
+                  >
+                    как посчитано →
+                  </a>
                 </span>
               </template>
               <template v-else>velocity: нет данных</template>
             </span>
           </div>
-
-          <!--
-            Сводка окна. Не счётчик нарушений («4 из 6 вне нормы» не отвечает ни насколько
-            плохо, ни куда движется), а вывод + типичное значение + динамика: число без
-            истории и сравнения бессмысленно (Tufte), а следствие отделено от причины (Cohn).
-          -->
-          <section
-            v-if="report.healthSummary.length && verdictText"
-            class="mb-4 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900"
-          >
-            <!-- Главный вывод словами -->
-            <div
-              class="border-l-4 px-4 py-3"
-              :style="toneOf(verdict?.critical ? 'crit' : verdict?.focus ? 'warn' : 'ok', 12)"
-            >
-              <p class="text-sm font-medium text-slate-800 dark:text-slate-100">
-                {{ verdictText.headline }}
-              </p>
-              <p
-                v-if="verdictText.detail"
-                class="mt-1 text-xs leading-relaxed text-slate-600 dark:text-slate-300"
-              >
-                {{ verdictText.detail }}
-              </p>
-              <p
-                v-if="improvedText.length"
-                class="mt-1.5 text-xs leading-relaxed text-emerald-700 dark:text-emerald-400"
-              >
-                Наладилось:
-                <span v-for="(im, idx) in improvedText" :key="im.rule">
-                  {{ im.text }} ({{ im.from }} → {{ im.to }}){{
-                    idx < improvedText.length - 1 ? ', ' : ''
-                  }}
-                </span>
-              </p>
-            </div>
-
-            <!-- Цифры по каждому правилу: типичное значение, ориентир, направление -->
-            <p
-              class="border-t border-slate-100 px-4 pt-2 text-[10px] uppercase tracking-wide text-slate-400 dark:border-slate-800"
-            >
-              типично за 6 спринтов / пороги (жёлтый / красный) · динамика
-            </p>
-            <div class="grid gap-x-6 gap-y-1.5 px-4 pb-2.5 pt-1.5 sm:grid-cols-2 xl:grid-cols-3">
-              <!--
-                Сетка внутри строки, а не flex с ml-auto: при узкой колонке значения
-                переносились на вторую строку и подписи соседних правил слипались.
-              -->
-              <div
-                v-for="rs in report.healthSummary"
-                :key="rs.rule"
-                class="grid grid-cols-[minmax(72px,auto)_minmax(0,1fr)_auto] items-baseline gap-x-2 text-xs"
-                :title="summaryHint(rs)"
-              >
-                <span class="truncate text-slate-500 dark:text-slate-400">
-                  {{ SUMMARY_LABEL[rs.rule] }}
-                </span>
-                <template v-if="rs.evaluated > 0">
-                  <span class="whitespace-nowrap">
-                    <b
-                      class="rounded border px-1 tabular-nums text-slate-800 dark:text-slate-100"
-                      :style="toneOf(rs.level ?? 'ok')"
-                    >
-                      {{ summaryValue(rs) }}
-                    </b>
-                    <span class="text-slate-400"> / {{ summaryLimits(rs) }} </span>
-                  </span>
-                  <span
-                    class="whitespace-nowrap text-right"
-                    :class="
-                      directionNote(rs) && !directionNote(rs)!.good
-                        ? 'text-amber-700 dark:text-amber-400'
-                        : 'text-slate-400'
-                    "
-                  >
-                    <template v-if="directionNote(rs)">
-                      {{ directionNote(rs)!.arrow }} {{ directionNote(rs)!.word }}
-                    </template>
-                  </span>
-                </template>
-                <span v-else class="col-span-2 text-slate-400">мало истории</span>
-              </div>
-            </div>
-          </section>
 
           <!-- Квартальная сводка: ряд кварталов со стек-баром CAP-микса (вариант A) -->
           <div class="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">

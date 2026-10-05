@@ -1,3 +1,5 @@
+import type { TeamCalendar } from './quarter';
+
 /**
  * Доменная модель детального отчёта по спринту — для страницы «задачи спринта».
  * Источник — Jira Sprint Report (greenhopper): completed SP = green bar (current estimate),
@@ -84,4 +86,6 @@ export interface SprintReportsResult {
    * пропадать, иначе следующее открытие снова начнёт с нуля.
    */
   fetched: ReadonlyMap<number, SprintReportDetail>;
+  /** Календарь команды по ВСЕЙ истории спринтов доски, а не только по загруженным отчётам. */
+  calendar: TeamCalendar;
 }
