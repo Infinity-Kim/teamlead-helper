@@ -29,8 +29,16 @@ const target = computed(() => p.value.targetCompletion);
 const carryover = computed(() => Math.round((1 - target.value) * 100));
 const inTarget = computed(() => outOf(1 - c.value.tau));
 const inStretch = computed(() => outOf(1 - c.value.stretchTau));
+const windowRows = computed(() => props.e.sprints.filter((s) => s.inWindow));
+/** Спринты окна, где такой план не уложился бы, — с их прилётами: главный ответ «почему не больше». */
+const windowMisses = computed(() =>
+  windowRows.value.filter((r) => r.allowed < p.value.recommended),
+);
+const olderCount = computed(() => props.e.sprints.length - windowRows.value.length);
+/** Есть спринты, где крупные задачи разнесены (работа ≠ закрыто). */
+const hasBigTasks = computed(() => props.e.sprints.some((s) => s.work !== s.completed));
 
-// --- График 1: допустимый план по спринтам (столбики) + линии рекомендации и медианы ---
+// --- График 1: допустимый план по спринтам (столбики), окно прогноза выделено ---
 
 const W = 760;
 const H = 220;
@@ -42,16 +50,17 @@ const bars = computed(() => {
   const step = (W - PAD.l - PAD.r) / rows.length;
   const bw = Math.min(24, step - 2);
   const y = (v: number) => PAD.t + (H - PAD.t - PAD.b) * (1 - v / max);
+  const first = rows.findIndex((r) => r.inWindow);
   return {
     max,
     y,
     ticks: niceTicks(max),
+    windowX: PAD.l + first * step,
     items: rows.map((r, i) => ({
       ...r,
       x: PAD.l + i * step + (step - bw) / 2,
       w: bw,
       top: y(r.allowed),
-      ok: r.allowed >= p.value.recommended,
       label: i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 8) === 0,
     })),
   };
@@ -75,67 +84,48 @@ function barPath(x: number, top: number, w: number, base: number): string {
 
 const shortName = (n: string) => n.replace(/^.*?[-\\]/, '');
 
-// --- График 2: все допустимые планы по возрастанию, отмечены 20% / 30% / медиана ---
+// --- График 2: плотность симуляции следующего спринта + отметки плана / вызова / медианы ---
 
-const strip = computed(() => {
-  const sorted = [...props.e.sprints].sort((a, b) => a.allowed - b.allowed);
-  const max = Math.max(...sorted.map((r) => r.allowed), 1);
-  const x = (v: number) => 24 + (W - 48) * (v / max);
+const SH = 190;
+const sim = computed(() => {
+  const d = props.e.density;
+  if (!d.length) return null;
+  const lo = Math.min(d[0].x, ...windowRows.value.map((r) => r.allowed));
+  const hi = Math.max(d[d.length - 1].x, ...windowRows.value.map((r) => r.allowed));
+  const ymax = Math.max(...d.map((q) => q.y)) * 1.1;
+  const x = (v: number) => 24 + (W - 48) * ((v - lo) / (hi - lo || 1));
+  const y = (v: number) => 30 + (SH - 30 - 50) * (1 - v / ymax);
+  const base = y(0);
+  const line = d.map((q, i) => `${i ? 'L' : 'M'}${x(q.x)},${y(q.y)}`).join(' ');
+  // Заливка «левее плана» — доля симуляций, где план не уложился бы (≈ τ).
+  const left = d.filter((q) => q.x <= p.value.recommended);
+  const area = left.length
+    ? `M${x(left[0].x)},${base} ` +
+      left.map((q) => `L${x(q.x)},${y(q.y)}`).join(' ') +
+      ` L${x(left[left.length - 1].x)},${base} Z`
+    : '';
   return {
     x,
-    dots: sorted.map((r, i) => ({ ...r, cx: x(r.allowed), cy: 46 + (i % 3) * 10 })),
+    base,
+    line,
+    area,
     marks: [
-      { v: props.e.q20, label: `нижние ${pct(c.value.tau)}`, strong: true },
-      { v: props.e.q30, label: `нижние ${pct(c.value.stretchTau)}`, strong: false },
-      { v: props.e.medianAllowed, label: 'медиана', strong: false },
+      { v: p.value.recommended, label: `план ${p.value.recommended}`, strong: true },
+      { v: p.value.stretch, label: `вызов ${p.value.stretch}`, strong: false },
+      { v: props.e.medianSim, label: `медиана ${fmt(props.e.medianSim)}`, strong: false },
     ],
+    dots: windowRows.value.map((r) => ({ ...r, cx: x(r.allowed) })),
   };
 });
 
-// --- График 3: тренд допустимого плана за последние спринты + линия Тейла–Сена ---
-
-const trend = computed(() => {
-  const t = props.e.trendLine;
-  if (!t) return null;
-  const n = t.values.length;
-  const fitAt = (i: number) => t.intercept + t.slope * i;
-  const lo = Math.min(...t.values, fitAt(0), fitAt(n - 1)) * 0.9;
-  const hi = Math.max(...t.values, fitAt(0), fitAt(n - 1)) * 1.08;
-  const x = (i: number) => PAD.l + ((W - PAD.l - PAD.r) * i) / Math.max(1, n - 1);
-  const y = (v: number) => PAD.t + (H - PAD.t - PAD.b) * (1 - (v - lo) / (hi - lo || 1));
-  return {
-    x,
-    y,
-    ticks: niceTicks(hi).filter((v) => v >= lo),
-    line: t.values.map((v, i) => `${i ? 'L' : 'M'}${x(i)},${y(v)}`).join(' '),
-    fit: `M${x(0)},${y(fitAt(0))} L${x(n - 1)},${y(fitAt(n - 1))}`,
-    points: t.values.map((v, i) => ({ v, name: t.names[i], cx: x(i), cy: y(v) })),
-    fitEnd: { cx: x(n - 1), cy: y(fitAt(n - 1)) },
-  };
-});
+const bt = computed(() => props.e.backtest);
 
 const trendVerdict = computed(() => {
   const t = p.value.trend;
-  if (!t) return 'Истории мало, чтобы проверять тренд — прогноз опирается на уровень.';
-  if (!t.active) {
-    return `Устойчивого тренда нет (Z = ${fmt(t.z)}, порог ±${c.value.trendZ}): колебания похожи на шум, прогноз опирается на уровень.`;
-  }
+  if (!t?.active) return '';
   const dir = t.slope > 0 ? 'растёт' : 'снижается';
-  return `Допустимый план ${dir} ≈ на ${fmt(Math.abs(t.slope))} SP за спринт (Z = ${fmt(t.z)}, порог ±${c.value.trendZ}) — модели с трендом учитывают это в прогнозе.`;
+  return `Внутри окна допустимый план ${dir} ≈ на ${fmt(Math.abs(t.slope))} SP за спринт (Манн–Кендалл Z = ${fmt(t.z)}, порог ±${c.value.trendZ}). В план тренд не добавляем: окно короткое, и план сам догонит новый уровень за ${c.value.window} спринтов — стрелка ${t.slope > 0 ? '↗' : '↘'} рядом с планом лишь предупреждает.`;
 });
-
-// --- Модели смеси ---
-
-const models = computed(() => [...props.e.models].sort((a, b) => b.weight - a.weight));
-const maxWeight = computed(() => Math.max(...props.e.models.map((m) => m.weight), 0.01));
-const modelHint: Record<string, string> = {
-  уровень: 'нижние 20% за последние N спринтов — «команда стабильна, помним N спринтов»',
-  забывание: 'то же, но старые спринты весят меньше: вес вдвое меньше каждые N спринтов',
-  тренд: 'если рост/спад значим — продлеваем линию Тейла–Сена на шаг, иначе как «уровень»',
-};
-const hintOf = (name: string) => modelHint[name.split(' ')[0]] ?? '';
-
-const bt = computed(() => props.e.backtest);
 </script>
 
 <template>
@@ -146,21 +136,37 @@ const bt = computed(() => props.e.backtest);
       <p class="mt-1 text-5xl font-semibold tabular-nums pe-text">≤ {{ p.recommended }} SP</p>
       <p class="mt-2">
         Столько брать в спринт на планировании, чтобы закрыть не меньше
-        <b>{{ pct(target) }}</b> взятого с учётом задач, которые прилетят по ходу. Это план
-        <b>с вызовом</b>: модель целится в {{ inTarget }} спринтов, а на истории команды
+        <b>{{ pct(target) }}</b> взятого с учётом задач, которые прилетят по ходу. Модель целится в
+        {{ inTarget }} спринтов; на истории команды
         <template v-if="bt.scored">
           уложилась бы в цель в <b>{{ bt.hitsPlan }} из {{ bt.scored }}</b> ({{
             pct(bt.hitsPlan / bt.scored)
           }}).
         </template>
         <template v-else>пока проверить не на чем.</template>
-        Если готовы рискнуть ещё — до <b>{{ p.stretch }} SP</b>.
+        Если готовы рискнуть — до <b>{{ p.stretch }} SP</b> (≈ {{ inStretch }}).
       </p>
-      <p class="mt-2 text-xs pe-subtle">
-        Посчитано по {{ p.count }} закрытым спринтам с Q4 2025 (с появления CAP-меток). Для
-        сравнения: медиана закрытого за последние 18 — {{ fmt(p.medianCompleted) }} SP, медиана
-        прилётов — {{ fmt(p.medianAdded) }} SP.
-      </p>
+      <div class="mt-3 rounded pe-sunken px-3 py-2">
+        <p class="font-medium pe-text">Почему столько, а не больше</p>
+        <p class="mt-1">
+          За последние {{ p.count }} спринтов команда закрывала обычно ≈
+          <b>{{ fmt(p.medianCompleted) }} SP</b>, но по ходу спринта прилетало ≈
+          <b>{{ fmt(p.medianAdded) }} SP</b>. План — это сколько брать <b>на старте</b>: прилёты
+          тоже войдут во «взятое», под них оставлено место. Такой план уложился бы в
+          <b>{{ p.windowFits }} из {{ p.count }}</b> последних спринтов<template
+            v-if="windowMisses.length"
+          >
+            ; не уложился бы в
+            <template v-for="(r, i) in windowMisses" :key="r.name"
+              >{{ i ? ', ' : '' }}{{ r.name }} (прилёты {{ fmt(r.added) }} SP → можно было
+              {{ fmt(r.allowed) }})</template
+            ></template
+          >.
+        </p>
+        <p class="mt-1 text-xs pe-subtle">
+          Хотите план больше — меньше прилётов: каждые 10 SP прилётов в среднем дают +10 SP к плану.
+        </p>
+      </div>
     </section>
 
     <!-- Шаг 1 -->
@@ -190,20 +196,31 @@ const bt = computed(() => props.e.backtest);
       <p class="rounded pe-sunken px-3 py-2 font-mono text-xs">
         допустимый план = закрыто ÷ {{ target }} − прилёты
       </p>
+      <p>
+        <b>Крупные задачи</b> (от {{ c.bigTaskSp }} SP) делаются дольше спринта, а Jira засчитывает
+        их целиком в спринте закрытия: спринт старта выглядит провалом, спринт закрытия — рекордом.
+        Поэтому вместо «закрыто» берём <b>работу</b>: SP крупной задачи раздаём спринтам по дням,
+        когда она была в работе (от первого входа в рабочий статус до закрытия), — даже если в
+        первый спринт она формально не входила.
+      </p>
       <p class="text-xs pe-subtle">
-        Пример — первый спринт истории {{ e.sprints[0].name }}: {{ fmt(e.sprints[0].completed) }} ÷
-        {{ target }} − {{ fmt(e.sprints[0].added) }} = {{ fmt(e.sprints[0].allowed) }} SP.
+        Пример — последний спринт {{ windowRows[windowRows.length - 1].name }}:
+        {{ fmt(windowRows[windowRows.length - 1].work) }} ÷ {{ target }} −
+        {{ fmt(windowRows[windowRows.length - 1].added) }} =
+        {{ fmt(windowRows[windowRows.length - 1].allowed) }} SP.
       </p>
 
       <figure class="overflow-x-auto rounded-lg border pe-border pe-surface p-3">
         <figcaption class="mb-1 flex flex-wrap gap-x-4 text-xs pe-subtle">
           <span>Допустимый план по спринтам, SP</span>
           <span class="inline-flex items-center gap-1.5">
-            <i class="inline-block h-2.5 w-2.5 rounded-sm pe-bg-bar" /> план ≤
-            {{ p.recommended }} уложился бы
+            <i class="inline-block h-2.5 w-2.5 rounded-sm pe-bg-bar" /> окно прогноза ({{
+              windowRows.length
+            }})
           </span>
-          <span class="inline-flex items-center gap-1.5">
-            <i class="inline-block h-2.5 w-2.5 rounded-sm pe-bg-muted" /> не уложился бы
+          <span v-if="olderCount" class="inline-flex items-center gap-1.5">
+            <i class="inline-block h-2.5 w-2.5 rounded-sm pe-bg-muted" /> раньше — только для
+            проверки
           </span>
         </figcaption>
         <svg :viewBox="`0 0 ${W} ${H}`" class="w-full min-w-[560px]" role="img">
@@ -227,15 +244,26 @@ const bt = computed(() => props.e.backtest);
               </text>
             </g>
           </g>
+          <line
+            v-if="olderCount"
+            :x1="bars.windowX"
+            :x2="bars.windowX"
+            :y1="PAD.t"
+            :y2="bars.y(0)"
+            class="pe-stroke-subtlest"
+            stroke-dasharray="3 3"
+            stroke-width="1"
+          />
           <path
             v-for="b in bars.items"
             :key="b.name"
             :d="barPath(b.x, b.top, b.w, bars.y(0))"
-            :class="b.ok ? 'pe-fill-bar' : 'pe-fill-muted'"
+            :class="b.inWindow ? 'pe-fill-bar' : 'pe-fill-muted'"
           >
             <title>
-              {{ b.name }}: закрыто {{ fmt(b.completed) }}, прилёты {{ fmt(b.added) }} → допустимый
-              план {{ fmt(b.allowed) }} SP
+              {{ b.name }}: закрыто {{ fmt(b.completed) }}<template v-if="b.work !== b.completed">
+              (по работе {{ fmt(b.work) }})</template >, прилёты {{ fmt(b.added) }} → допустимый
+              план {{ fmt(b.allowed) }} SP{{ b.inWindow ? '' : ' (вне окна)' }}
             </title>
           </path>
           <g v-for="b in bars.items" :key="'l' + b.name">
@@ -249,7 +277,6 @@ const bt = computed(() => props.e.backtest);
               {{ shortName(b.name) }}
             </text>
           </g>
-          <!-- Линии: рекомендация и медиана -->
           <line
             :x1="PAD.l"
             :x2="W - PAD.r"
@@ -265,21 +292,6 @@ const bt = computed(() => props.e.backtest);
           >
             план {{ p.recommended }}
           </text>
-          <line
-            :x1="PAD.l"
-            :x2="W - PAD.r"
-            :y1="bars.y(e.medianAllowed)"
-            :y2="bars.y(e.medianAllowed)"
-            class="pe-stroke-subtlest"
-            stroke-width="1"
-          />
-          <text
-            :x="W - PAD.r + 6"
-            :y="bars.y(e.medianAllowed) + 4"
-            class="pe-fill-subtle text-[11px]"
-          >
-            медиана {{ fmt(e.medianAllowed) }}
-          </text>
         </svg>
       </figure>
 
@@ -290,64 +302,132 @@ const bt = computed(() => props.e.backtest);
             <tr>
               <th class="py-1 font-normal">спринт</th>
               <th class="font-normal">закрыто</th>
+              <th v-if="hasBigTasks" class="font-normal">по работе</th>
               <th class="font-normal">прилёты</th>
               <th class="font-normal">допустимый план</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="r in [...e.sprints].reverse()" :key="r.name" class="border-t pe-border">
-              <td class="py-1">{{ r.name }}</td>
+            <tr
+              v-for="r in [...e.sprints].reverse()"
+              :key="r.name"
+              class="border-t pe-border"
+              :class="r.inWindow ? '' : 'pe-subtlest'"
+            >
+              <td class="py-1">{{ r.name }}{{ r.inWindow ? ' ·' : '' }}</td>
               <td>{{ fmt(r.completed) }}</td>
+              <td v-if="hasBigTasks">{{ r.work !== r.completed ? fmt(r.work) : '' }}</td>
               <td>{{ fmt(r.added) }}</td>
               <td>{{ fmt(r.allowed) }}</td>
             </tr>
           </tbody>
         </table>
+        <p class="mt-1 pe-subtlest">
+          · — спринт в окне прогноза. «По работе» — закрыто с крупными задачами, разнесёнными по
+          времени работы; допустимый план считается от него.
+        </p>
       </details>
     </section>
 
     <!-- Шаг 3 -->
     <section class="space-y-2">
-      <h3 class="text-base font-semibold pe-text">
-        3. Почему нижние {{ pct(c.tau) }}, а не медиана
-      </h3>
+      <h3 class="text-base font-semibold pe-text">3. Почему только {{ c.window }} спринтов</h3>
       <p>
-        Допустимый план от спринта к спринту гуляет. Если взять медиану, план будет больше
-        допустимого в каждом втором спринте. Если минимум — один провальный спринт обрушит план.
-        Берём <b>нижний квантиль {{ pct(c.tau) }}</b
-        >: план, который был допустим в {{ inTarget }} спринтов. «Вызов» — квантиль
-        {{ pct(c.stretchTau) }} (≈ {{ inStretch }}).
+        План должен описывать команду <b>в нынешнем составе</b>. Длинная история смешивает режимы:
+        найм, уход, другой тип задач — и план месяцами тянется к тому, какой команда была.
+        {{ c.window }} последних спринтов ≈ квартал: достаточно, чтобы увидеть разброс, и после
+        смены состава план полностью перестраивается за {{ c.window }} спринтов. Более старые
+        спринты на графике — только для проверки на истории ниже.
       </p>
-      <figure class="overflow-x-auto rounded-lg border pe-border pe-surface p-3">
-        <figcaption class="mb-1 text-xs pe-subtle">
-          Все допустимые планы по возрастанию (каждая точка — спринт), SP
+      <p>
+        Но 6 точек — мало для «нижних {{ pct(c.tau) }}» в лоб: это второй снизу спринт, один спринт
+        двигает план скачком, а в цель такой план попадает лишь в ≈ 5 из 7. Поэтому следующий спринт
+        мы <b>симулируем</b>.
+      </p>
+    </section>
+
+    <!-- Шаг 4 -->
+    <section class="space-y-2">
+      <h3 class="text-base font-semibold pe-text">4. Монте-Карло следующего спринта</h3>
+      <p>Один симулированный спринт:</p>
+      <ol class="list-decimal space-y-0.5 pl-5">
+        <li>
+          берём случайный спринт из окна <b>целиком</b> — пару «закрыто + прилёты» (в спринт с
+          большими прилётами команда обычно и закрывает больше, связь сохраняется);
+        </li>
+        <li>
+          добавляем шум: закрыто ± {{ fmt(e.bandwidth.completed) }} SP, прилёты ±
+          {{ fmt(e.bandwidth.added) }} SP (σ нормального шума) — следующий спринт не обязан
+          повторить один из шести;
+        </li>
+        <li>считаем его допустимый план по формуле шага 2.</li>
+      </ol>
+      <p>
+        Ширина шума — <b>правило Сильвермана</b> по разбросу окна: h = 0.9 · min(σ, IQR ÷ 1.34) ·
+        n<sup>−1/5</sup>. Чем ровнее команда, тем уже шум. Шум добавляет к разбросу шести спринтов
+        свой — без поправки хвост уходил бы ниже реальных спринтов и план был бы занижен. Поэтому
+        симуляцию <b>сжимаем к среднему</b> (поправка Сильвермана): её разброс равен разбросу окна.
+        Миллионы таких спринтов дают кривую ниже; её считаем точно, формулой (смесь нормальных
+        распределений), а не случайными прогонами — поэтому план не дрожит от перезагрузки страницы.
+      </p>
+      <p class="rounded pe-sunken px-3 py-2 font-mono text-xs">
+        P(допустимый ≤ x) = ⅙ · Σ Φ((x − c<sub>i</sub>) ÷ {{ fmt(p.spread) }}) · план = x, где P =
+        {{ c.tau }}; c<sub>i</sub> = среднее + k · (допустимый<sub>i</sub> − среднее), k = 1 ÷ √(1 +
+        h² ÷ σ²)
+      </p>
+
+      <figure v-if="sim" class="overflow-x-auto rounded-lg border pe-border pe-surface p-3">
+        <figcaption class="mb-1 flex flex-wrap gap-x-4 text-xs pe-subtle">
+          <span>Допустимый план следующего спринта по симуляции, SP</span>
+          <span class="inline-flex items-center gap-1.5">
+            <i class="inline-block h-2.5 w-2.5 rounded-sm pe-bg-muted" /> {{ pct(c.tau) }} худших
+            исходов — план бы не уложился
+          </span>
+          <span class="inline-flex items-center gap-1.5">
+            <i class="inline-block h-2.5 w-2.5 rounded-full pe-bg-bar" /> спринты окна
+          </span>
         </figcaption>
-        <svg :viewBox="`0 0 ${W} 110`" class="w-full min-w-[560px]" role="img">
-          <line x1="24" :x2="W - 24" y1="86" y2="86" class="pe-stroke-grid" stroke-width="1" />
-          <g v-for="m in strip.marks" :key="m.label">
+        <svg :viewBox="`0 0 ${W} ${SH}`" class="w-full min-w-[560px]" role="img">
+          <path :d="sim.area" class="pe-fill-muted" />
+          <path
+            :d="sim.line"
+            class="pe-stroke-bar"
+            stroke-width="2"
+            fill="none"
+            stroke-linejoin="round"
+          />
+          <line
+            x1="24"
+            :x2="W - 24"
+            :y1="sim.base"
+            :y2="sim.base"
+            class="pe-stroke-grid"
+            stroke-width="1"
+          />
+          <g v-for="(m, i) in sim.marks" :key="m.label">
             <line
-              :x1="strip.x(m.v)"
-              :x2="strip.x(m.v)"
-              y1="20"
-              y2="86"
+              :x1="sim.x(m.v)"
+              :x2="sim.x(m.v)"
+              y1="22"
+              :y2="sim.base"
               :class="m.strong ? 'pe-stroke-text' : 'pe-stroke-subtlest'"
               :stroke-width="m.strong ? 2 : 1"
             />
             <text
-              :x="strip.x(m.v)"
-              :y="m.label === 'медиана' ? 104 : 14"
+              :x="sim.x(m.v)"
+              :y="i === 2 ? SH - 4 : 14"
               text-anchor="middle"
-              :class="m.strong ? 'pe-fill-text font-semibold ' : 'pe-fill-subtle'"
+              :class="m.strong ? 'pe-fill-text font-semibold' : 'pe-fill-subtle'"
               class="text-[11px]"
             >
-              {{ m.label }} · {{ fmt(m.v) }}
+              {{ m.label }}
             </text>
           </g>
           <circle
-            v-for="d in strip.dots"
+            v-for="d in sim.dots"
             :key="d.name"
             :cx="d.cx"
-            :cy="d.cy"
+            :cy="sim.base + 14"
             r="4.5"
             class="pe-fill-bar pe-stroke-surface"
             stroke-width="2"
@@ -356,211 +436,72 @@ const bt = computed(() => props.e.backtest);
           </circle>
         </svg>
       </figure>
-      <p class="text-xs pe-subtle">
-        Простые квантили по всей истории ({{ fmt(e.q20) }} / {{ fmt(e.q30) }}) — для наглядности.
-        Итоговый план {{ p.recommended }} считает смесь моделей из шага 5: она учитывает, что свежие
-        спринты важнее старых и что команда может расти.
+      <p v-else class="text-xs pe-subtle">
+        Разброса в окне нет — симулировать нечего, план равен допустимому плану спринтов окна.
       </p>
-
-      <div class="rounded-lg border pe-border pe-surface p-3">
-        <p class="font-medium pe-text">Проверка на истории команды</p>
-        <p class="mt-1">
-          Для каждого из последних {{ bt.scored }} спринтов план пересчитан
-          <b>только по спринтам до него</b> — как если бы мы планировали тогда — и сравнён с тем,
-          что было допустимо:
-        </p>
-        <ul class="mt-1 list-disc pl-5">
-          <li>
-            рекомендация уложилась бы в цель в <b>{{ bt.hitsPlan }} из {{ bt.scored }}</b> спринтов
-            ({{ pct(bt.hitsPlan / bt.scored) }});
-          </li>
-          <li>
-            медиана закрытого за {{ c.velocityWindow }} спринтов (прежняя «velocity») — в
-            <b>{{ bt.hitsMedian }} из {{ bt.scored }}</b> ({{ pct(bt.hitsMedian / bt.scored) }}).
-          </li>
-        </ul>
-        <p class="mt-1 text-xs pe-subtle">
-          Ориентир — {{ inTarget }} ({{ pct(1 - c.tau) }}). На коротком ряду в один-два спринта
-          разница случайна; числа показаны как есть, без подгонки.
-        </p>
-        <details class="mt-2 text-xs">
-          <summary class="cursor-pointer pe-subtle">По спринтам</summary>
-          <table class="mt-2 w-full tabular-nums">
-            <thead class="text-left pe-subtlest">
-              <tr>
-                <th class="py-1 font-normal">спринт</th>
-                <th class="font-normal">рекомендация</th>
-                <th class="font-normal">медиана закрытого</th>
-                <th class="font-normal">было допустимо</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in [...bt.rows].reverse()" :key="r.name" class="border-t pe-border">
-                <td class="py-1">{{ r.name }}</td>
-                <td>{{ r.plan }} {{ r.plan <= r.allowed ? '✓' : '✗' }}</td>
-                <td>{{ fmt(r.median) }} {{ r.median <= r.allowed ? '✓' : '✗' }}</td>
-                <td>{{ fmt(r.allowed) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </details>
-      </div>
-    </section>
-
-    <!-- Шаг 4 -->
-    <section class="space-y-2">
-      <h3 class="text-base font-semibold pe-text">4. Растёт ли команда</h3>
       <p>
-        Проверяем последние {{ c.trendWindow }} спринтов тестом <b>Манна–Кендалла</b>: для каждой
-        пары спринтов смотрим, стал ли поздний больше раннего. Если «больше» заметно перевешивает
-        «меньше» (|Z| ≥ {{ c.trendZ }}, это ≈ 90% уверенности), рост неслучаен. Наклон считаем
-        линией <b>Тейла–Сена</b> — медиана наклонов всех пар, один выброс её не сдвигает.
+        План <b>≤ {{ p.recommended }} SP</b> — точка, левее которой {{ pct(c.tau) }} симуляций
+        (округлено вниз: лишний SP сверху — уже выход за цель в пограничном спринте). «Вызов»
+        <b>{{ p.stretch }} SP</b> — то же для {{ pct(c.stretchTau) }}.
       </p>
-      <p class="font-medium">{{ trendVerdict }}</p>
-      <figure v-if="trend" class="overflow-x-auto rounded-lg border pe-border pe-surface p-3">
-        <figcaption class="mb-1 flex flex-wrap gap-x-4 text-xs pe-subtle">
-          <span>Допустимый план, последние {{ c.trendWindow }} спринтов, SP</span>
-          <span class="inline-flex items-center gap-1.5"
-            ><i class="inline-block h-0.5 w-4 pe-bg-bar" /> факт</span
-          >
-          <span class="inline-flex items-center gap-1.5"
-            ><i class="inline-block h-0.5 w-4 pe-bg-fit" /> линия Тейла–Сена</span
-          >
-        </figcaption>
-        <svg :viewBox="`0 0 ${W} ${H}`" class="w-full min-w-[560px]" role="img">
-          <g v-for="t in trend.ticks" :key="t">
-            <line
-              :x1="PAD.l"
-              :x2="W - PAD.r"
-              :y1="trend.y(t)"
-              :y2="trend.y(t)"
-              class="pe-stroke-grid"
-              stroke-width="1"
-            />
-            <text
-              :x="PAD.l - 6"
-              :y="trend.y(t) + 3"
-              text-anchor="end"
-              class="pe-fill-subtlest text-[10px]"
-            >
-              {{ t }}
-            </text>
-          </g>
-          <path
-            :d="trend.fit"
-            class="pe-stroke-fit"
-            stroke-width="2"
-            fill="none"
-            stroke-linecap="round"
-          />
-          <path
-            :d="trend.line"
-            class="pe-stroke-bar"
-            stroke-width="2"
-            fill="none"
-            stroke-linejoin="round"
-            stroke-linecap="round"
-          />
-          <circle
-            v-for="pt in trend.points"
-            :key="pt.name"
-            :cx="pt.cx"
-            :cy="pt.cy"
-            r="4"
-            class="pe-fill-bar pe-stroke-surface"
-            stroke-width="2"
-          >
-            <title>{{ pt.name }}: {{ fmt(pt.v) }} SP</title>
-          </circle>
-          <text
-            :x="trend.fitEnd.cx + 8"
-            :y="trend.fitEnd.cy + 4"
-            class="pe-fill-subtle text-[11px]"
-          >
-            {{ p.trend && p.trend.slope >= 0 ? '+' : '' }}{{ fmt(p.trend?.slope ?? 0) }} SP/спр.
-          </text>
-          <g v-for="(pt, i) in trend.points" :key="'n' + pt.name">
-            <text
-              v-if="i % 2 === 0 || i === trend.points.length - 1"
-              :x="pt.cx"
-              :y="H - PAD.b + 14"
-              text-anchor="middle"
-              class="pe-fill-subtlest text-[10px]"
-            >
-              {{ shortName(pt.name) }}
-            </text>
-          </g>
-        </svg>
-      </figure>
+      <p v-if="trendVerdict" class="text-xs pe-subtle">{{ trendVerdict }}</p>
     </section>
 
     <!-- Шаг 5 -->
     <section class="space-y-2">
-      <h3 class="text-base font-semibold pe-text">5. Смесь моделей: какая память у команды</h3>
-      <p>
-        Неизвестно заранее, сколько спринтов «помнить»: у команд меняется состав и режим. Поэтому
-        {{ e.models.length || 11 }} моделей с разной памятью делают прогноз, и каждую проверяем на
-        последних {{ c.hedgeLookback }} спринтах — как будто планировали тогда. Ошибка —
-        <b>pinball-loss</b>: перелёт (взяли больше допустимого) штрафуется в
-        {{ fmt((1 - c.tau) / c.tau) }} раза сильнее недолёта, потому что перенос дороже недогруза.
-        Вес модели — <b>e<sup>−(ошибка − лучшая ошибка)</sup></b> (метод Hedge): на 1 SP хуже лучшей
-        — вес в e ≈ 2.7 раза меньше. План — взвешенная сумма прогнозов, округлённая вниз.
-      </p>
-      <p v-if="!models.length" class="text-xs pe-subtle">
-        Истории пока мало для честной проверки моделей — работает одна запасная модель (тренд по 12
-        / уровень по 18 спринтам).
-      </p>
-      <div v-else class="overflow-x-auto rounded-lg border pe-border pe-surface p-3">
-        <table class="w-full text-xs tabular-nums">
-          <thead class="text-left pe-subtlest">
-            <tr>
-              <th class="py-1 font-normal">модель</th>
-              <th class="font-normal">прогноз, SP</th>
-              <th class="font-normal">ошибка, SP</th>
-              <th class="w-1/3 font-normal">вес в плане</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="m in models"
-              :key="m.model"
-              class="border-t pe-border"
-              :title="hintOf(m.model)"
-            >
-              <td class="py-1.5 pr-2">{{ m.model }}</td>
-              <td>{{ fmt(m.forecast) }}</td>
-              <td>{{ fmt(m.loss) }}</td>
-              <td>
-                <div class="flex items-center gap-2">
-                  <div
-                    class="h-2.5 rounded-r pe-bg-bar"
-                    :style="{ width: `${(m.weight / maxWeight) * 80}%` }"
-                  />
-                  <span>{{ pct(m.weight) }}</span>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-        <ul class="mt-2 space-y-0.5 text-xs pe-subtle">
-          <li><b>уровень N</b> — {{ modelHint['уровень'] }}.</li>
-          <li><b>забывание ½ за N</b> — {{ modelHint['забывание'] }}.</li>
-          <li><b>тренд N / уровень M</b> — {{ modelHint['тренд'] }}.</li>
-        </ul>
+      <h3 class="text-base font-semibold pe-text">5. Проверка на истории команды</h3>
+      <div class="rounded-lg border pe-border pe-surface p-3">
+        <p v-if="!bt.scored">
+          Пока спринтов меньше {{ c.window + 1 }} — проверить не на чем: каждому проверяемому
+          спринту нужно {{ c.window }} спринтов перед ним.
+        </p>
+        <template v-else>
+          <p>
+            Для каждого из последних {{ bt.scored }} спринтов план пересчитан
+            <b>только по {{ c.window }} спринтам перед ним</b> — как если бы мы планировали тогда —
+            и сравнён с тем, что было допустимо:
+          </p>
+          <ul class="mt-1 list-disc pl-5">
+            <li>
+              рекомендация уложилась бы в цель в
+              <b>{{ bt.hitsPlan }} из {{ bt.scored }}</b> спринтов ({{
+                pct(bt.hitsPlan / bt.scored)
+              }});
+            </li>
+            <li>
+              медиана закрытого за {{ c.window }} спринтов (прежняя «velocity») — в
+              <b>{{ bt.hitsMedian }} из {{ bt.scored }}</b> ({{ pct(bt.hitsMedian / bt.scored) }}).
+            </li>
+          </ul>
+          <p class="mt-1 text-xs pe-subtle">
+            Ориентир — {{ inTarget }} ({{ pct(1 - c.tau) }}). На трёх командах (59 спринтов, живые
+            данные Jira) схема попадает в 78% — ближе всех проверенных вариантов к цели. На коротком
+            ряду одной команды разница в один-два спринта случайна; числа показаны как есть, без
+            подгонки.
+          </p>
+          <details class="mt-2 text-xs">
+            <summary class="cursor-pointer pe-subtle">По спринтам</summary>
+            <table class="mt-2 w-full tabular-nums">
+              <thead class="text-left pe-subtlest">
+                <tr>
+                  <th class="py-1 font-normal">спринт</th>
+                  <th class="font-normal">рекомендация</th>
+                  <th class="font-normal">медиана закрытого</th>
+                  <th class="font-normal">было допустимо</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in [...bt.rows].reverse()" :key="r.name" class="border-t pe-border">
+                  <td class="py-1">{{ r.name }}</td>
+                  <td>{{ r.plan }} {{ r.plan <= r.allowed ? '✓' : '✗' }}</td>
+                  <td>{{ fmt(r.median) }} {{ r.median <= r.allowed ? '✓' : '✗' }}</td>
+                  <td>{{ fmt(r.allowed) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </details>
+        </template>
       </div>
-    </section>
-
-    <!-- Шаг 6 -->
-    <section class="space-y-2">
-      <h3 class="text-base font-semibold pe-text">6. Итог</h3>
-      <p>
-        План <b>≤ {{ p.recommended }} SP</b> — взвешенный прогноз нижних
-        {{ pct(c.tau) }} допустимого плана на следующий спринт, вниз до целого (лишний SP сверху —
-        уже выход за цель в пограничном спринте). «Вызов» <b>{{ p.stretch }} SP</b> — та же смесь
-        для {{ pct(c.stretchTau) }}. Ни одного ручного параметра под команду: окна, тренд и веса
-        выбирают её же данные, и при смене режима (найм, уход, другой тип задач) вес сам перетечёт к
-        моделям, которые угадывают лучше.
-      </p>
     </section>
 
     <!-- Словарь -->
@@ -574,51 +515,36 @@ const bt = computed(() => props.e.backtest);
         <dt class="font-medium">Допустимый план</dt>
         <dd>сколько можно было взять на старте, чтобы спринт ровно уложился в цель выполнения.</dd>
         <dt class="font-medium">Квантиль 20%</dt>
+        <dd>значение, ниже которого 20% исходов. План на нём допустим примерно в 80% спринтов.</dd>
+        <dt class="font-medium">Монте-Карло</dt>
         <dd>
-          значение, ниже которого 20% наблюдений. План на нём допустим примерно в 80% спринтов.
+          оценка через симуляцию множества возможных исходов вместо одной формулы «в среднем».
         </dd>
-        <dt class="font-medium">Pinball-loss</dt>
+        <dt class="font-medium">Сглаженный бутстреп</dt>
         <dd>
-          ошибка прогноза квантиля: недолёт × 0.2, перелёт × 0.8. Минимальна ровно у правильного
-          квантиля.
+          симуляция из своих же наблюдений с небольшим шумом: исходы похожи на прошлые, но не
+          обязаны их повторять.
         </dd>
-        <dt class="font-medium">Hedge</dt>
-        <dd>
-          смешивание прогнозов с весами, экспоненциально убывающими по ошибке; гарантирует, что
-          смесь не сильно хуже лучшей модели.
-        </dd>
+        <dt class="font-medium">Правило Сильвермана</dt>
+        <dd>ширина шума по разбросу данных и их числу; устойчиво к одному выбросу (через IQR).</dd>
         <dt class="font-medium">Манн–Кендалл</dt>
-        <dd>
-          ранговый тест на монотонный тренд: не требует нормальности, выбросы на него почти не
-          влияют.
-        </dd>
-        <dt class="font-medium">Тейл–Сен</dt>
-        <dd>
-          робастная прямая: наклон = медиана наклонов всех пар точек, выдерживает до ~29% выбросов.
-        </dd>
+        <dd>ранговый тест на монотонный тренд — по нему показываем стрелку ↗ / ↘ у плана.</dd>
       </dl>
       <h3 class="pt-2 text-sm font-semibold pe-text">Литература</h3>
       <ul class="list-disc space-y-0.5 pl-5">
+        <li>Efron B., Tibshirani R. An Introduction to the Bootstrap, 1993.</li>
         <li>
-          Koenker R., Bassett G. Regression Quantiles. Econometrica, 1978 — квантили и pinball-loss.
+          Silverman B. W. Density Estimation for Statistics and Data Analysis, 1986 — сглаженный
+          бутстреп и правило ширины.
         </li>
         <li>Gneiting T. Quantiles as Optimal Point Forecasts. Int. J. of Forecasting, 2011.</li>
         <li>
-          Mann H. B. Nonparametric Tests Against Trend. Econometrica, 1945; Kendall M. G. Rank
-          Correlation Methods, 1975.
-        </li>
-        <li>
-          Theil H. A Rank-Invariant Method of Linear Regression, 1950; Sen P. K. Estimates of the
-          Regression Coefficient Based on Kendall's Tau. JASA, 1968.
-        </li>
-        <li>
-          Freund Y., Schapire R. A Decision-Theoretic Generalization of On-Line Learning (Hedge),
-          1997.
+          Mann H. B. Nonparametric Tests Against Trend. Econometrica, 1945; Sen P. K. Estimates of
+          the Regression Coefficient Based on Kendall's Tau. JASA, 1968.
         </li>
         <li>Cohn M. Agile Estimating and Planning, 2005 — velocity и планирование итераций.</li>
         <li>
-          Vacanti D. Actionable Agile Metrics for Predictability, 2015 — прогноз по распределению, а
-          не по среднему.
+          Vacanti D. When Will It Be Done?, 2017 — Монте-Карло для прогнозов в agile-командах.
         </li>
       </ul>
     </section>

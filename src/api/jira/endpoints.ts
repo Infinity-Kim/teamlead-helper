@@ -40,4 +40,12 @@ export const endpoints = {
    */
   issueChangelog: (issueKey: string) =>
     `/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=changelog&fields=status,created`,
+
+  /**
+   * Полная история задачи постранично. expand=changelog отдаёт не больше 100 записей — у долгих
+   * крупных задач (правки, комментарии-поля) первый вход в работу туда не попадает (13 из 52
+   * задач ≥ 13 SP ELCAS/POC/Web, живой API 2026-10-12). Пагинация — по `isLast`.
+   */
+  issueChangelogPage: (issueKey: string, startAt: number) =>
+    `/rest/api/3/issue/${encodeURIComponent(issueKey)}/changelog?startAt=${startAt}&maxResults=100`,
 };

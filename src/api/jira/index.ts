@@ -13,13 +13,18 @@ import {
   sprintQuarter,
   teamCalendar,
   quarterOf,
+  bigTaskWorkOf,
+  BIG_TASK_SP,
+  PLAN_HISTORY,
   type AgingIssue,
+  type BigTaskWork,
   type BucketPoints,
 } from '@/core/metrics';
 import type {
   AgileSprintDto,
   AgileSprintPageDto,
   GhBacklogDataDto,
+  GhChangelogPageDto,
   GhIssueChangelogDto,
   GhSprintReportDto,
 } from './dto';
@@ -32,6 +37,7 @@ import {
   normalizeSprintState,
   extractStatusTransitions,
   mapSprintReportDetail,
+  statusTransitionsOf,
 } from './mappers';
 
 type GhSprint = AgileSprintDto;
@@ -193,6 +199,50 @@ async function fetchStatusTransitions(issueKey: string) {
     () => null,
   );
   return dto ? extractStatusTransitions(dto) : [];
+}
+
+/** Полная история статусов задачи постранично (или [] при ошибке). */
+async function fetchAllStatusTransitions(issueKey: string) {
+  const values: NonNullable<GhChangelogPageDto['values']> = [];
+  try {
+    for (let startAt = 0; ;) {
+      const page = await jiraGetJsonRetry<GhChangelogPageDto>(
+        endpoints.issueChangelogPage(issueKey, startAt),
+      );
+      values.push(...(page.values ?? []));
+      if (page.isLast !== false || !page.values?.length) break;
+      startAt += page.values.length;
+    }
+  } catch {
+    return [];
+  }
+  return statusTransitionsOf(values);
+}
+
+/**
+ * Время работы над крупными задачами (≥ BIG_TASK_SP) спринтов, которые видит план
+ * (последние PLAN_HISTORY отчётов, `reports` — от свежих к старым) — для разнесения их SP по
+ * спринтам (sprintFlows). Крупных задач немного (≈ 1–2 на спринт), запрос на каждую.
+ * Задачи без входа в рабочий статус в мапу не попадают — для них sprintFlows делит поровну.
+ */
+export async function getBigTaskWork(
+  reports: readonly SprintReportDetail[],
+  workStatuses: readonly string[],
+  doneStatuses: readonly string[],
+): Promise<Map<string, BigTaskWork>> {
+  const keys = new Set<string>();
+  for (const r of reports.slice(0, PLAN_HISTORY + 1)) {
+    for (const i of [...r.completedIssues, ...r.notCompletedIssues]) {
+      if ((i.points ?? 0) >= BIG_TASK_SP) keys.add(i.key);
+    }
+  }
+  const list = [...keys];
+  const works = await mapLimit(list, CHANGELOG_CONCURRENCY, async (key) =>
+    bigTaskWorkOf(await fetchAllStatusTransitions(key), workStatuses, doneStatuses),
+  );
+  const out = new Map<string, BigTaskWork>();
+  works.forEach((w, i) => w && out.set(list[i], w));
+  return out;
 }
 
 /**

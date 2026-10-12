@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { ref, onMounted, computed } from 'vue';
 import {
+  getBigTaskWork,
   getBoardSprintReportsSince,
   setJiraAuth,
   setJiraTabTransport,
@@ -13,6 +14,7 @@ import {
   divisions,
   quarterTarget,
   sprintHealthThresholds,
+  statusConfig,
   sprintHealthColors,
   type QuarterTargetConfig,
   readSprintCache,
@@ -33,7 +35,7 @@ import {
   sprintCapBreakdown,
   velocitySummary,
   planCapacity,
-  sprintFlow,
+  sprintFlows,
   type SprintFlow,
   describePlan,
   explainPlan,
@@ -317,8 +319,14 @@ async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
     fresh,
   );
   await writeSprintCache(fetched);
-  // План — по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии.
-  const built = buildReport(team, sprints, failed, sprints.map(sprintFlow).reverse(), calendar);
+  // План — по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии. Крупные
+  // задачи (≥ 13 SP) идут по два спринта — их SP разносим по времени работы над ними.
+  const status = await statusConfig.getValue();
+  const work = await getBigTaskWork(sprints, status.workStatuses, status.doneStatuses).catch(
+    () => new Map(),
+  );
+  const flows = sprintFlows([...sprints].reverse(), work);
+  const built = buildReport(team, sprints, failed, flows, calendar);
   memCache.set(team.rapidViewId, built);
   return built;
 }

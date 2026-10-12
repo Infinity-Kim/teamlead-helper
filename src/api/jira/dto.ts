@@ -110,6 +110,15 @@ export interface GhIssueChangelogDto {
   };
 }
 
+/** Страница /rest/api/3/issue/{key}/changelog. */
+export interface GhChangelogPageDto {
+  isLast?: boolean;
+  values?: Array<{
+    created: string;
+    items?: Array<{ field: string; fromString?: string; toString?: string }>;
+  }>;
+}
+
 /**
  * Ответ /rest/greenhopper/1.0/rapid/charts/sprintreport?rapidViewId=&sprintId=.
  * Полный список полей contents проверен на живом API (board 80, sprint 9465, 2026-07-27).
