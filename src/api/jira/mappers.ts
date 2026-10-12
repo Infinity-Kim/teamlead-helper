@@ -10,6 +10,7 @@ import type {
   AgileSprintDto,
   GhBacklogIssueDto,
   GhEstimateSum,
+  GhChangelogPageDto,
   GhIssueChangelogDto,
   GhSprintDto,
   GhReportIssue,
@@ -59,7 +60,13 @@ export function mapIssue(dto: GhBacklogIssueDto): BacklogIssue {
 
 /** Извлечь переходы статусов из changelog (только field==="status"), для age/cycle time. */
 export function extractStatusTransitions(dto: GhIssueChangelogDto): StatusTransition[] {
-  const histories = dto.changelog?.histories ?? [];
+  return statusTransitionsOf(dto.changelog?.histories ?? []);
+}
+
+/** Переходы статусов из записей истории (общая часть expand=changelog и постраничного /changelog). */
+export function statusTransitionsOf(
+  histories: NonNullable<GhChangelogPageDto['values']>,
+): StatusTransition[] {
   return histories.flatMap((h) =>
     (h.items ?? [])
       .filter((it) => it.field === 'status' && typeof it.toString === 'string')

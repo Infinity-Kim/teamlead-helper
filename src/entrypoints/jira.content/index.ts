@@ -3,6 +3,7 @@ import CapBar from '@/components/CapBar.vue';
 import QuarterBar from '@/components/QuarterBar.vue';
 import {
   getBoardBacklog,
+  getBigTaskWork,
   getBoardSprintReportsSince,
   getQuarterSprints,
   getAgingIssues,
@@ -13,7 +14,7 @@ import {
   calcCapDistribution,
   issueKeysByBucket,
   planCapacity,
-  sprintFlow,
+  sprintFlows,
   targetCompletionFromCarryover,
   withHealthDefaults,
   type PlanCapacity,
@@ -237,10 +238,17 @@ export default defineContentScript({
           await readSprintCache(),
         );
         await writeSprintCache(res.fetched); // кеш по sprintId — пишем и для ушедшей доски
+        // Крупные задачи (≥ 13 SP) идут по два спринта — их SP разносим по времени работы.
+        const status = await statusConfig.getValue();
+        const work = await getBigTaskWork(
+          res.sprints,
+          status.workStatuses,
+          status.doneStatuses,
+        ).catch(() => new Map());
         if (gen !== boardGen) return;
         // Отчёты приходят свежими первыми, модели нужна хронология.
         plan = planCapacity(
-          res.sprints.map(sprintFlow).reverse(),
+          sprintFlows([...res.sprints].reverse(), work),
           targetCompletionFromCarryover(health.carryoverPct),
         );
         for (const m of mounted.values()) m.props.plan = plan;
