@@ -1,6 +1,6 @@
 import type { SprintReportDetail } from '@/core/domain';
 import { median } from './median';
-import { firstWorkStart, type StatusTransition } from './work-item-age';
+import { firstWorkStart, type StatusTransition } from './status-transitions';
 
 /**
  * Рекомендуемый объём планирования спринта — ЧИСТЫЕ функции. Слой: core/metrics.

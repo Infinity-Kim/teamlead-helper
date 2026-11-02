@@ -6,8 +6,6 @@ import {
   getBigTaskWork,
   getBoardSprintReportsSince,
   getQuarterSprints,
-  getAgingIssues,
-  getCycleTimeHistory,
 } from '@/api/jira';
 import {
   issuesOfSprint,
@@ -19,14 +17,10 @@ import {
   withHealthDefaults,
   type PlanCapacity,
   calcQuarterBalance,
-  ageThresholdsFromHistory,
-  calcAgingIssues,
-  type IssueAge,
 } from '@/core/metrics';
 import {
   capTargets,
   boardConfig,
-  sprintHistoryCount,
   sprintHealthThresholds,
   readSprintCache,
   writeSprintCache,
@@ -158,11 +152,6 @@ export default defineContentScript({
     let plan: PlanCapacity | null = null;
     // Квартальный баланс текущего квартала (того, где активный спринт). null — нет данных.
     let quarterBalance: QuarterBalance | null = null;
-    // Id активного спринта на доске (для подсветки застревающих задач).
-    let activeSprintId: number | null = null;
-    // Возраст застревающих задач (aging/stuck) по ключу — для подсветки карточек. Пусто — нет.
-    let agingByKey = new Map<string, IssueAge>();
-    let agingDecorated = false;
     let quarterApp: VueApp | null = null;
     let quarterHost: HTMLElement | null = null;
     // Reactive-props QuarterBar — обновляем на месте вместо remount приложения на каждом кадре.
@@ -205,9 +194,6 @@ export default defineContentScript({
       const topLevel = backlog.issues.filter((i) => i.hierarchyLevel === 0);
       unlabeledKeys = new Set(issueKeysByBucket(topLevel).Unlabeled);
 
-      // Активный спринт доски — по нему считается возраст задач (Work Item Age).
-      activeSprintId = backlog.sprints.find((s) => s.state === 'ACTIVE')?.id ?? null;
-
       statsBySprintId.clear();
       for (const sprint of backlog.sprints) {
         const sprintIssues = issuesOfSprint(backlog.issues, sprint.id);
@@ -215,7 +201,7 @@ export default defineContentScript({
       }
       if (switched) {
         renderAll();
-        void loadPlan().then(loadQuarter).then(loadAging);
+        void loadPlan().then(loadQuarter);
       }
       return changed;
     }
@@ -281,36 +267,6 @@ export default defineContentScript({
         renderQuarterBlock();
       } catch (e) {
         console.warn('[TLH] loadQuarter failed:', e);
-      }
-    }
-
-    /**
-     * Загрузить возраст застревающих задач активного спринта (Work Item Age) + пороги из истории
-     * cycle time. Подсвечивает aging/stuck карточки на доске. N+1 запросов changelog — фоном.
-     */
-    async function loadAging() {
-      const gen = boardGen;
-      try {
-        if (activeSprintId === null) {
-          agingByKey = new Map();
-          return;
-        }
-        const rapidViewId = await resolveRapidViewId();
-        const status = await statusConfig.getValue();
-        const n = await sprintHistoryCount.getValue();
-
-        const [history, aging] = await Promise.all([
-          getCycleTimeHistory(rapidViewId, n, status.workStatuses, status.doneStatuses),
-          getAgingIssues(rapidViewId, activeSprintId, status.workStatuses),
-        ]);
-        if (gen !== boardGen) return;
-        const thresholds = ageThresholdsFromHistory(history);
-        const now = Date.now();
-        const aged = calcAgingIssues(aging, thresholds, now);
-        agingByKey = new Map(aged.map((a) => [a.key, a]));
-        applyAgingHighlight();
-      } catch (e) {
-        console.warn('[TLH] loadAging failed:', e);
       }
     }
 
@@ -621,77 +577,6 @@ export default defineContentScript({
       unlabeledDecorated = decorated;
     }
 
-    // --- Подсветка застревающих задач (Work Item Age) ---
-    const AGING_HL_ATTR = 'data-tlh-aging';
-    const AGE_COLORS: Record<IssueAge['severity'], string> = {
-      aging: 'var(--ds-background-warning-bold, #e56910)',
-      stuck: 'var(--ds-background-danger-bold, #c9372c)',
-      normal: '',
-    };
-
-    function decorateAging(card: HTMLElement, age: IssueAge) {
-      const color = AGE_COLORS[age.severity];
-      card.setAttribute(AGING_HL_ATTR, age.severity);
-      card.style.outline = `2px solid ${color}`;
-      card.style.outlineOffset = '-2px';
-      card.style.borderRadius = '4px';
-      card.style.boxShadow = `inset 4px 0 0 0 ${color}`;
-      let badge = card.querySelector<HTMLElement>('.tlh-aging-badge');
-      if (!badge) {
-        badge = document.createElement('span');
-        badge.className = 'tlh-aging-badge';
-        Object.assign(badge.style, {
-          position: 'absolute',
-          top: '2px',
-          right: '4px',
-          zIndex: '5',
-          padding: '0 6px',
-          height: '16px',
-          lineHeight: '16px',
-          fontSize: '10px',
-          fontWeight: '700',
-          color: '#fff',
-          borderRadius: '8px',
-          fontFamily: 'var(--ds-font-family-body, sans-serif)',
-          cursor: 'help',
-        } satisfies Partial<CSSStyleDeclaration>);
-        if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
-        card.appendChild(badge);
-      }
-      const days = age.ageDays === 1 ? '1 день' : `${age.ageDays} дн.`;
-      badge.textContent = age.severity === 'stuck' ? `застряла ${days}` : `в работе ${days}`;
-      badge.style.background = color;
-      // Пояснение (нативный tooltip — в light DOM Jira надёжнее popover): что значит возраст.
-      badge.title =
-        `Возраст задачи в работе: ${days} (с момента входа в рабочий статус, wall-clock).\n` +
-        (age.severity === 'stuck'
-          ? 'ЗАСТРЯЛА: дольше 85% задач команды (p85 cycle time). Разберите на планировании — что блокирует.'
-          : 'СТАРЕЕТ: дольше типичного времени цикла команды (медиана). Кандидат в перенос — стоит обсудить.') +
-        '\nПорог берётся из истории команды, а не задан вручную.';
-    }
-    function undecorateAging(card: HTMLElement) {
-      card.removeAttribute(AGING_HL_ATTR);
-      card.style.outline = '';
-      card.style.outlineOffset = '';
-      card.style.borderRadius = '';
-      card.style.boxShadow = '';
-      card.querySelector('.tlh-aging-badge')?.remove();
-    }
-    /** Переприменить подсветку возраста ко всем карточкам (горячий путь: зовётся из renderAll). */
-    function applyAgingHighlight() {
-      if (agingByKey.size === 0 && !agingDecorated) return;
-      let decorated = false;
-      document.querySelectorAll<HTMLElement>(CARD_SEL).forEach((card) => {
-        const key = cardKeyOf(card);
-        const age = key ? agingByKey.get(key) : undefined;
-        const has = card.hasAttribute(AGING_HL_ATTR);
-        if (age && card.getAttribute(AGING_HL_ATTR) !== age.severity) decorateAging(card, age);
-        else if (!age && has) undecorateAging(card);
-        if (age) decorated = true;
-      });
-      agingDecorated = decorated;
-    }
-
     /** Снять Unlabeled-подсветку (если активна) и убрать её с карточек доски. */
     function clearUnlabeled() {
       if (!unlabeledActive) return;
@@ -833,7 +718,6 @@ export default defineContentScript({
       document.querySelectorAll<HTMLElement>(CONTAINER_SEL).forEach(renderForContainer);
       syncActiveFromUrl();
       applyUnlabeledHighlight(); // переприменяем после скролл-ре-рендера карточек
-      applyAgingHighlight(); // подсветка застревающих задач тоже переприменяется на ре-рендере
       if (quarterBalance) void renderQuarterBlock(); // блок квартала мог потерять хост при ре-рендере
     }
 
@@ -847,8 +731,6 @@ export default defineContentScript({
       dataFingerprint = '';
       unlabeledActive = false;
       unlabeledDecorated = false;
-      agingByKey = new Map();
-      agingDecorated = false;
       quarterBalance = null;
       quarterApp?.unmount();
       quarterApp = null;
@@ -865,7 +747,6 @@ export default defineContentScript({
       mark('rendered');
       void loadPlan(); // план грузится фоном (N+1 запросов) — не блокирует основной рендер
       void loadQuarter(); // квартальный баланс — тоже фоном
-      void loadAging(); // возраст застревающих задач (changelog N+1) — фоном
     } catch (e) {
       mark('error:' + (e instanceof Error ? e.message : String(e)));
       console.warn('[TLH] не удалось загрузить backlog:', e);
@@ -922,10 +803,8 @@ export default defineContentScript({
       observer.disconnect();
       if (refetchTimer) clearTimeout(refetchTimer);
       cancelAnimationFrame(rafRender);
-      // Снять подсветку (Unlabeled + возраст) с карточек, чтобы не осталась после выгрузки.
+      // Снять Unlabeled-подсветку с карточек, чтобы не осталась после выгрузки.
       clearUnlabeled();
-      agingByKey = new Map();
-      applyAgingHighlight();
       mounted.forEach((m) => m.app.unmount());
       quarterApp?.unmount();
       quarterHost?.remove();
@@ -937,17 +816,12 @@ export default defineContentScript({
       void refresh().then(renderAll);
       void loadPlan();
       void loadQuarter();
-      void loadAging();
     });
-    // Изменили N (сколько спринтов в историю) — пересчитать пороги возраста.
-    sprintHistoryCount.watch(() => void loadAging());
     // Порог переноса задаёт цель выполнения — пересчитать план.
     sprintHealthThresholds.watch(() => void loadPlan());
     // Квартальная цель / режим UI — перезагрузить квартальный баланс.
     quarterTarget.watch(() => void loadQuarter());
     quarterUiMode.watch(() => void loadQuarter());
-    // Изменили статусы «в работе»/«done» — пересчитать возраст застревающих.
-    statusConfig.watch(() => void loadAging());
 
     // Смена доски в SPA тоже перезагружает медиану/квартал (через resetForBoardChange + loadData).
   },

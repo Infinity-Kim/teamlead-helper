@@ -19,7 +19,7 @@ import { issue, sprint } from './__test-helpers__/sprint-fixtures';
 
 /**
  * Пороги по умолчанию (как в настройках расширения), первый / второй:
- * скорость 10/20, перенос 20/30, переоценка 10/20, добавлено 10/20, выброшено 0/3; окно 6.
+ * скорость 10/20, перенос 20/30, переоценка 10/20, добавлено 10/20, выброшено 0/10%; окно 6.
  */
 const T: HealthThresholds = toThresholds(DEFAULT_HEALTH_SETTINGS);
 
@@ -229,36 +229,64 @@ describe('rulePunted', () => {
     expect(rulePunted(s, T).status).toBe('no-data');
   });
 
-  it('любой выброс при первом пороге 0 → warn, с ключами и SP', () => {
+  it('ничего не выбросили → ok, 0%', () => {
+    const s = sprint({ sprintId: 1, completedIssues: [issue('A', 5)] });
+    const r = rulePunted(s, T);
+    expect(r.status).toBe('ok');
+    expect(r.value).toBe(0);
+  });
+
+  it('доля SP выброшенного от объёма на старте: 5 из 100 → warn, с ключами и SP', () => {
     const s = sprint({
       sprintId: 1,
-      completedIssues: [issue('A', 5)],
+      completedIssues: [issue('A', 95)],
       puntedIssues: [issue('X', 3), issue('Y', 2)],
     });
     const r = rulePunted(s, T);
     expect(r.status).toBe('warn');
-    expect(r.value).toBe(2);
+    expect(r.value).toBe(0.05);
     expect(r.evidence?.issueKeys).toEqual(['X', 'Y']);
     expect(r.evidence?.points).toBe(5);
   });
 
-  it('больше 3 выброшенных задач (второй порог) → crit, ровно 3 — ещё warn', () => {
-    const mk = (n: number) =>
+  it('ровно 10% — уже crit (issue #27: «от 10% и выше»), 9% — warn', () => {
+    const mk = (punted: number) =>
       sprint({
         sprintId: 1,
-        completedIssues: [issue('A', 5)],
-        puntedIssues: Array.from({ length: n }, (_, i) => issue(`P${i}`, 1)),
+        completedIssues: [issue('A', 100 - punted)],
+        puntedIssues: [issue('X', punted)],
       });
-    expect(rulePunted(mk(3), T).status).toBe('warn');
-    expect(rulePunted(mk(4), T).status).toBe('crit');
+    expect(rulePunted(mk(9), T).status).toBe('warn');
+    expect(rulePunted(mk(10), T).status).toBe('crit');
+    expect(rulePunted(mk(30), T).status).toBe('crit');
+  });
+
+  it('добавленная по ходу и выброшенная задача не входит в объём на старте', () => {
+    const s = sprint({
+      sprintId: 1,
+      completedIssues: [issue('A', 100)],
+      puntedIssues: [issue('NEW', 5)],
+      addedIssueKeys: new Set(['NEW']),
+    });
+    expect(rulePunted(s, T).value).toBe(0.05);
+  });
+
+  it('выбросили, а объёма на старте нет → no-data', () => {
+    const s = sprint({
+      sprintId: 1,
+      completedIssues: [],
+      puntedIssues: [issue('NEW', 5)],
+      addedIssueKeys: new Set(['NEW']),
+    });
+    expect(rulePunted(s, T).status).toBe('no-data');
   });
 
   it('порог можно ослабить договорённостью команды', () => {
-    const relaxed = { ...T, punted: 2 };
+    const relaxed = { ...T, punted: 0.1, puntedCrit: 0.2 };
     const s = sprint({
       sprintId: 1,
-      completedIssues: [issue('A', 5)],
-      puntedIssues: [issue('X', 3), issue('Y', 2)],
+      completedIssues: [issue('A', 95)],
+      puntedIssues: [issue('X', 5)],
     });
     expect(rulePunted(s, relaxed).status).toBe('ok');
   });
@@ -308,8 +336,8 @@ describe('настройки порогов', () => {
       reestimateCritPct: 20,
       scopeAddedPct: 10,
       scopeAddedCritPct: 20,
-      puntedCount: 0,
-      puntedCritCount: 3,
+      puntedPct: 0,
+      puntedCritPct: 10,
       velocityWindow: 6,
     });
   });
@@ -320,13 +348,12 @@ describe('настройки порогов', () => {
       carryoverPct: 25,
       reestimatePct: 10,
       scopeAddedPct: 10,
-      puntedCount: 1,
       velocityWindow: 4,
     };
     const s = withHealthDefaults(legacy);
     expect(s.velocityDropPct).toBe(15);
     expect(s.carryoverCritPct).toBe(30);
-    expect(s.puntedCritCount).toBe(3);
+    expect(s.puntedCritPct).toBe(10);
     const t = toThresholds(legacy);
     expect(t.carryover).toBe(0.25);
     expect(t.carryoverCrit).toBe(0.3);
@@ -340,20 +367,19 @@ describe('настройки порогов', () => {
     expect(withHealthDefaults(null)).toEqual(DEFAULT_HEALTH_SETTINGS);
   });
 
-  it('нормализация: без отрицательных, второй порог не ниже первого, штуки целые', () => {
+  it('нормализация: без отрицательных, второй порог не ниже первого, окно целое', () => {
     const n = normalizeHealthSettings({
       ...DEFAULT_HEALTH_SETTINGS,
       carryoverPct: 40,
       carryoverCritPct: 30,
       reestimatePct: -5,
-      puntedCount: 1.6,
-      puntedCritCount: 0,
+      puntedPct: 5,
+      puntedCritPct: 0,
       velocityWindow: 1,
     });
     expect(n.carryoverCritPct).toBe(40);
     expect(n.reestimatePct).toBe(0);
-    expect(n.puntedCount).toBe(2);
-    expect(n.puntedCritCount).toBe(2);
+    expect(n.puntedCritPct).toBe(5);
     expect(n.velocityWindow).toBe(2);
   });
 });

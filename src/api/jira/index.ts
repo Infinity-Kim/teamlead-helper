@@ -8,15 +8,12 @@ import type {
 } from '@/core/domain';
 import {
   splitPointsByBucket,
-  firstWorkStart,
-  cycleTimeDays,
   sprintQuarter,
   teamCalendar,
   quarterOf,
   bigTaskWorkOf,
   BIG_TASK_SP,
   PLAN_HISTORY,
-  type AgingIssue,
   type BigTaskWork,
   type BucketPoints,
 } from '@/core/metrics';
@@ -25,7 +22,6 @@ import type {
   AgileSprintPageDto,
   GhBacklogDataDto,
   GhChangelogPageDto,
-  GhIssueChangelogDto,
   GhSprintReportDto,
 } from './dto';
 import { currentConcurrency, jiraGetJson, jiraGetJsonRetry, mapWithConcurrency } from './client';
@@ -35,7 +31,6 @@ import {
   mapSprint,
   labelsToBuckets,
   normalizeSprintState,
-  extractStatusTransitions,
   mapSprintReportDetail,
   statusTransitionsOf,
 } from './mappers';
@@ -78,27 +73,6 @@ interface SprintReportsFetch {
   ok: Array<{ sprint: GhSprint; report: GhSprintReportDto }>;
   /** Сколько отчётов не удалось получить даже после ретраев (частичные данные). */
   failed: number;
-}
-
-/**
- * Общий orchestration N+1-запросов истории: список спринтов (Agile API, с датами) → отбор →
- * sprintreport каждого через ПУЛ конкурентности (не Promise.all по всем — иначе десятки
- * одновременных запросов пробивают burst-лимит Jira → 429 → спринты пропадают).
- * Каждый запрос с ретраем (Retry-After + backoff). Упавшие НЕ теряются молча — считаются в `failed`.
- *
- * `limit` отсекает последние N спринтов ПО ДАТЕ СТАРТА (свежие первыми). Agile API отдаёт
- * закрытые спринты от старых к новым и параметра сортировки не имеет — поэтому сортируем сами.
- */
-async function fetchRecentSprintReports(
-  rapidViewId: number,
-  limit: number,
-  states = 'closed',
-): Promise<SprintReportsFetch> {
-  const all = await fetchBoardSprints(rapidViewId, states);
-  const recent = all
-    .sort((a, b) => Date.parse(b.startDate ?? '') - Date.parse(a.startDate ?? ''))
-    .slice(0, Math.max(0, limit));
-  return fetchSprintReports(rapidViewId, recent);
 }
 
 /** sprintreport каждого спринта через пул конкурентности; упавшие считаются в `failed`. */
@@ -193,14 +167,6 @@ export interface QuarterSprints {
   sprints: SprintRecord[];
 }
 
-/** Переходы статусов одной задачи через changelog (или [] при ошибке — не роняем весь расчёт). */
-async function fetchStatusTransitions(issueKey: string) {
-  const dto = await jiraGetJsonRetry<GhIssueChangelogDto>(endpoints.issueChangelog(issueKey)).catch(
-    () => null,
-  );
-  return dto ? extractStatusTransitions(dto) : [];
-}
-
 /** Полная история статусов задачи постранично (или [] при ошибке). */
 async function fetchAllStatusTransitions(issueKey: string) {
   const values: NonNullable<GhChangelogPageDto['values']> = [];
@@ -261,72 +227,8 @@ async function mapLimit<T, R>(
   });
 }
 
-/** Равномерная выборка ≤`max` элементов (каждый k-й) — для дешёвого сэмпла истории. */
-function sample<T>(items: readonly T[], max: number): T[] {
-  if (items.length <= max) return [...items];
-  const step = items.length / max;
-  const out: T[] = [];
-  for (let i = 0; i < max; i++) out.push(items[Math.floor(i * step)]);
-  return out;
-}
-
-/**
- * Задачи активного спринта, которые СЕЙЧАС в работе, с моментом входа в первый рабочий статус —
- * для Work Item Age. `workStatuses` = имена статусов «реальной работы» (ELCAS: DEV/В работе; НЕ
- * Ready for DEV — это очередь, решение пользователя). Возраст считает core/metrics по `startedAt`.
- *
- * N+1 запросов (changelog на каждую in-progress задачу) — вызывать фоном. Задачи без найденного
- * старта работы (ещё не начинались) отсеиваются.
- */
-export async function getAgingIssues(
-  rapidViewId: number,
-  activeSprintId: number,
-  workStatuses: readonly string[],
-): Promise<AgingIssue[]> {
-  const backlog = await getBoardBacklog(rapidViewId);
-  const inProgress = backlog.issues.filter(
-    (i) =>
-      i.hierarchyLevel === 0 &&
-      i.sprintIds.includes(activeSprintId) &&
-      i.statusCategory === 'indeterminate',
-  );
-
-  const results = await mapLimit(inProgress, CHANGELOG_CONCURRENCY, async (issue) => {
-    const transitions = await fetchStatusTransitions(issue.key);
-    const startedAt = firstWorkStart(transitions, workStatuses);
-    return startedAt ? { key: issue.key, startedAt } : null;
-  });
-  return results.filter((r): r is AgingIssue => r !== null);
-}
-
-/**
- * История cycle time (дни, start=вход в рабочий статус → done) по завершённым задачам последних
- * `lastN` закрытых спринтов — для порогов возраста (медиана=aging, p85=stuck). N+1 запросов.
- * Берём completedIssues отчётов и тянем changelog каждой. Незавершённые по данным changelog — null, отсев.
- */
-/** Макс. задач для расчёта порогов cycle time (сэмпл: медиана/p85 стабильны и на ~50). */
-const CYCLE_HISTORY_SAMPLE = 48;
 /** Ограничение параллельных changelog-запросов (чтобы не залить Jira / не словить rate-limit). */
 const CHANGELOG_CONCURRENCY = 6;
-
-export async function getCycleTimeHistory(
-  rapidViewId: number,
-  lastN: number,
-  workStatuses: readonly string[],
-  doneStatuses: readonly string[],
-): Promise<number[]> {
-  const { ok } = await fetchRecentSprintReports(rapidViewId, lastN);
-  const allKeys = ok.flatMap(({ report }) =>
-    (report.contents?.completedIssues ?? []).map((i) => i.key),
-  );
-  // Не тянем changelog для ВСЕХ завершённых (их сотни) — равномерный сэмпл + пул воркеров.
-  const keys = sample(allKeys, CYCLE_HISTORY_SAMPLE);
-  const cycleTimes = await mapLimit(keys, CHANGELOG_CONCURRENCY, async (key) => {
-    const transitions = await fetchStatusTransitions(key);
-    return cycleTimeDays(transitions, workStatuses, doneStatuses);
-  });
-  return cycleTimes.filter((d): d is number => d !== null);
-}
 
 /** Свернуть задачи отчёта в SP по бакетам + unlabeled (SP на закрытии = currentEstimate). */
 function bucketizeReport(issues: GhSprintReportDto['contents']['completedIssues']): BucketPoints {
