@@ -78,16 +78,15 @@ function describe(r: RuleResult): string {
     case 'scope-added':
       return `Добавлено после старта ${pct(r.value!)} от объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Пороги: не более ${limits}`;
     case 'punted':
-      return r.value === 0
+      return (r.evidence?.issueKeys.length ?? 0) === 0
         ? 'Из спринта после старта ничего не выбрасывали'
-        : `Выброшено ${r.value} зад. (${r.evidence?.points ?? 0} SP) после старта. Пороги: не более ${r.threshold} / ${r.critThreshold} зад.`;
+        : `Выброшено после старта ${pct(r.value!)} от объёма на старте (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Жёлтый выше ${pct(r.threshold)}, красный от ${pct(r.critThreshold)}`;
   }
 }
 
 /** Компактное значение на чипе. */
 function display(r: RuleResult): string {
   if (r.value === null) return '—';
-  if (r.rule === 'punted') return `${r.value}`;
   const pct = Math.round(Math.abs(r.value) * 100);
   if (r.rule === 'velocity-drop') return `${r.value > 0 ? '↓' : '↑'}${pct}%`;
   return `${pct}%`;

@@ -34,14 +34,6 @@ export const endpoints = {
     `?rapidViewId=${rapidViewId}&sprintId=${sprintId}`,
 
   /**
-   * История изменений задачи (переходы статусов) — для Work Item Age и cycle time.
-   * Platform REST v3. fields=status обязателен (иначе тянет всё). Старый /search задепрекейчен (410),
-   * поэтому changelog берём per-issue (проверено на живом API 2026-07-08).
-   */
-  issueChangelog: (issueKey: string) =>
-    `/rest/api/3/issue/${encodeURIComponent(issueKey)}?expand=changelog&fields=status,created`,
-
-  /**
    * Полная история задачи постранично. expand=changelog отдаёт не больше 100 записей — у долгих
    * крупных задач (правки, комментарии-поля) первый вход в работу туда не попадает (13 из 52
    * задач ≥ 13 SP ELCAS/POC/Web, живой API 2026-10-12). Пагинация — по `isLast`.

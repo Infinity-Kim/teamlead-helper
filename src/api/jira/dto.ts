@@ -93,23 +93,6 @@ export interface GhReportIssue {
   typeName?: string; // тип задачи, напр. "История", "Spike"
 }
 
-// --- Changelog задачи (переходы статусов) для Work Item Age / cycle time ---
-
-/** Ответ /rest/api/3/issue/<KEY>?expand=changelog&fields=status,created. */
-export interface GhIssueChangelogDto {
-  fields?: {
-    created?: string;
-    status?: { name?: string; statusCategory?: { key?: string } };
-  };
-  changelog?: {
-    total?: number;
-    histories?: Array<{
-      created: string; // момент изменения
-      items?: Array<{ field: string; fromString?: string; toString?: string }>;
-    }>;
-  };
-}
-
 /** Страница /rest/api/3/issue/{key}/changelog. */
 export interface GhChangelogPageDto {
   isLast?: boolean;

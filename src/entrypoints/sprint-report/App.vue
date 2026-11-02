@@ -552,15 +552,15 @@ function healthOf(sprintId: number): RuleResult[] {
 }
 
 /**
- * Клик по чипу правила: раскрыть спринт и показать задачи, на которых основано число.
- * Повторный клик по тому же правилу — свернуть подсветку.
+ * Клик по чипу правила: показать задачи, на которых основано число, не меняя раскрытие спринта.
+ * Повторный клик по тому же правилу — скрыть их.
  */
 function onRuleClick(sid: number, rule: RuleId) {
   const next = new Map(ruleFilter.value);
   if (next.get(sid) === rule) next.delete(sid);
   else next.set(sid, rule);
   ruleFilter.value = next;
-  if (next.has(sid) && !openSprints.value.has(sid)) toggleSprint(sid);
+  // Раскрытие спринта не трогаем (issue #25): задачи правила показываются отдельным блоком.
 }
 
 /** Подтверждающие данные активного правила спринта (какие задачи дали число). */
@@ -578,9 +578,6 @@ function evidenceLevel(r: RuleResult): HealthLevel {
 
 /** «30% при порогах 20% / 30%» — значение правила против жёлтого и красного порога. */
 function evidenceLimits(r: RuleResult): string {
-  if (r.rule === 'punted') {
-    return `${fmtNum(r.value ?? 0)} зад. при порогах ${fmtNum(r.threshold)} / ${fmtNum(r.critThreshold)}`;
-  }
   const pct = (v: number) => `${Math.round(Math.abs(v) * 100)}%`;
   return `${pct(r.value ?? 0)} при порогах ${pct(r.threshold)} / ${pct(r.critThreshold)}`;
 }
@@ -1338,6 +1335,75 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     </div>
                   </div>
 
+                  <!-- Задачи, на которых основано число выбранного правила — карточками -->
+                  <div
+                    v-if="activeEvidence(s.sprintId)"
+                    class="border-t px-4 py-3"
+                    :style="toneOf(evidenceLevel(activeEvidence(s.sprintId)!.result), 12)"
+                  >
+                    <div
+                      class="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-slate-700 dark:text-slate-200"
+                    >
+                      <span>{{ RULE_LABEL[activeEvidence(s.sprintId)!.rule] }}</span>
+                      <span class="font-normal text-slate-500 dark:text-slate-400">
+                        {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
+                        {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
+                        <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
+                          · {{ evidenceLimits(activeEvidence(s.sprintId)!.result) }}
+                        </template>
+                      </span>
+                      <button
+                        type="button"
+                        class="ml-auto text-[11px] font-normal text-indigo-600 hover:underline dark:text-indigo-400"
+                        @click="onRuleClick(s.sprintId, activeEvidence(s.sprintId)!.rule)"
+                      >
+                        × закрыть
+                      </button>
+                    </div>
+
+                    <ul class="grid gap-1.5 sm:grid-cols-2">
+                      <li
+                        v-for="e in evidenceCards(s)"
+                        :key="e.key"
+                        class="rounded-md border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900"
+                      >
+                        <div class="flex items-baseline gap-2">
+                          <a
+                            :href="`${jiraBase}/browse/${e.key}`"
+                            target="_blank"
+                            rel="noopener"
+                            class="font-mono text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
+                          >
+                            {{ e.key }}
+                          </a>
+                          <span
+                            class="ml-auto whitespace-nowrap font-mono text-[11px] font-semibold tabular-nums text-slate-700 dark:text-slate-200"
+                          >
+                            {{ contribution(e) }}
+                          </span>
+                        </div>
+                        <div class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300">
+                          {{ e.issue?.summary || '—' }}
+                        </div>
+                        <div
+                          v-if="e.issue"
+                          class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400"
+                        >
+                          <span>{{ e.issue.type }}</span>
+                          <span
+                            class="rounded px-1 py-0.5 font-medium"
+                            :class="statusTone(e.issue.status)"
+                          >
+                            {{ e.issue.status }}
+                          </span>
+                          <span v-if="capLabel(e.issue)" class="font-mono text-violet-500">
+                            {{ capLabel(e.issue) }}
+                          </span>
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+
                   <!-- Раскрытый список задач -->
                   <div
                     v-if="openSprints.has(s.sprintId)"
@@ -1350,77 +1416,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     >
                       Фильтр: {{ SLICE_LABEL[sliceFilter.get(s.sprintId)!] }} —
                       {{ visibleIssues(s).length }} из {{ s.completedIssues.length }} задач
-                    </div>
-
-                    <!-- Задачи, на которых основано число выбранного правила — карточками -->
-                    <div
-                      v-if="activeEvidence(s.sprintId)"
-                      class="border-b px-4 py-3"
-                      :style="toneOf(evidenceLevel(activeEvidence(s.sprintId)!.result), 12)"
-                    >
-                      <div
-                        class="mb-2 flex flex-wrap items-baseline gap-x-2 text-xs font-medium text-slate-700 dark:text-slate-200"
-                      >
-                        <span>{{ RULE_LABEL[activeEvidence(s.sprintId)!.rule] }}</span>
-                        <span class="font-normal text-slate-500 dark:text-slate-400">
-                          {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
-                          {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
-                          <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
-                            · {{ evidenceLimits(activeEvidence(s.sprintId)!.result) }}
-                          </template>
-                        </span>
-                        <button
-                          type="button"
-                          class="ml-auto text-[11px] font-normal text-indigo-600 hover:underline dark:text-indigo-400"
-                          @click="onRuleClick(s.sprintId, activeEvidence(s.sprintId)!.rule)"
-                        >
-                          × закрыть
-                        </button>
-                      </div>
-
-                      <ul class="grid gap-1.5 sm:grid-cols-2">
-                        <li
-                          v-for="e in evidenceCards(s)"
-                          :key="e.key"
-                          class="rounded-md border border-slate-200 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900"
-                        >
-                          <div class="flex items-baseline gap-2">
-                            <a
-                              :href="`${jiraBase}/browse/${e.key}`"
-                              target="_blank"
-                              rel="noopener"
-                              class="font-mono text-[11px] font-medium text-indigo-600 hover:underline dark:text-indigo-400"
-                            >
-                              {{ e.key }}
-                            </a>
-                            <span
-                              class="ml-auto whitespace-nowrap font-mono text-[11px] font-semibold tabular-nums text-slate-700 dark:text-slate-200"
-                            >
-                              {{ contribution(e) }}
-                            </span>
-                          </div>
-                          <div
-                            class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300"
-                          >
-                            {{ e.issue?.summary || '—' }}
-                          </div>
-                          <div
-                            v-if="e.issue"
-                            class="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400"
-                          >
-                            <span>{{ e.issue.type }}</span>
-                            <span
-                              class="rounded px-1 py-0.5 font-medium"
-                              :class="statusTone(e.issue.status)"
-                            >
-                              {{ e.issue.status }}
-                            </span>
-                            <span v-if="capLabel(e.issue)" class="font-mono text-violet-500">
-                              {{ capLabel(e.issue) }}
-                            </span>
-                          </div>
-                        </li>
-                      </ul>
                     </div>
 
                     <table class="w-full text-sm">

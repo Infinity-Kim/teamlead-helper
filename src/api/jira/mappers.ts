@@ -11,7 +11,6 @@ import type {
   GhBacklogIssueDto,
   GhEstimateSum,
   GhChangelogPageDto,
-  GhIssueChangelogDto,
   GhSprintDto,
   GhReportIssue,
   GhSprintReportDto,
@@ -56,11 +55,6 @@ export function mapIssue(dto: GhBacklogIssueDto): BacklogIssue {
     statusName: dto.statusName ?? '',
     statusCategory: normalizeStatusCategory(dto.status?.statusCategory?.key),
   };
-}
-
-/** Извлечь переходы статусов из changelog (только field==="status"), для age/cycle time. */
-export function extractStatusTransitions(dto: GhIssueChangelogDto): StatusTransition[] {
-  return statusTransitionsOf(dto.changelog?.histories ?? []);
 }
 
 /** Переходы статусов из записей истории (общая часть expand=changelog и постраничного /changelog). */

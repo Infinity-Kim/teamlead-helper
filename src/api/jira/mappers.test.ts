@@ -4,7 +4,7 @@ import {
   extractStoryPoints,
   mapIssue,
   mapSprint,
-  extractStatusTransitions,
+  statusTransitionsOf,
 } from './mappers';
 import type { GhBacklogIssueDto } from './dto';
 
@@ -84,32 +84,28 @@ describe('mapIssue / mapSprint', () => {
   });
 });
 
-describe('extractStatusTransitions', () => {
+describe('statusTransitionsOf', () => {
   it('вытаскивает только переходы статуса из changelog', () => {
-    const tr = extractStatusTransitions({
-      changelog: {
-        histories: [
-          {
-            created: '2026-07-02T17:06:37.777+0300',
-            items: [
-              { field: 'status', fromString: 'Ready for DEV', toString: 'DEV' },
-              { field: 'assignee', toString: 'кто-то' }, // не статус — игнор
-            ],
-          },
-          {
-            created: '2026-07-05T10:00:00+0300',
-            items: [{ field: 'status', fromString: 'DEV', toString: 'Testing' }],
-          },
+    const tr = statusTransitionsOf([
+      {
+        created: '2026-07-02T17:06:37.777+0300',
+        items: [
+          { field: 'status', fromString: 'Ready for DEV', toString: 'DEV' },
+          { field: 'assignee', toString: 'кто-то' }, // не статус — игнор
         ],
       },
-    });
+      {
+        created: '2026-07-05T10:00:00+0300',
+        items: [{ field: 'status', fromString: 'DEV', toString: 'Testing' }],
+      },
+    ]);
     expect(tr).toEqual([
       { at: '2026-07-02T17:06:37.777+0300', to: 'DEV' },
       { at: '2026-07-05T10:00:00+0300', to: 'Testing' },
     ]);
   });
 
-  it('пустой changelog → []', () => {
-    expect(extractStatusTransitions({})).toEqual([]);
+  it('пустая история → []', () => {
+    expect(statusTransitionsOf([])).toEqual([]);
   });
 });

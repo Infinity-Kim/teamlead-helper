@@ -118,11 +118,6 @@ export const sprintListCache = storage.defineItem<Record<string, SprintListCache
 /** Свежесть списка спринтов. Спринты закрываются раз в 2 недели — 15 минут с запасом. */
 export const SPRINT_LIST_TTL_MS = 15 * 60 * 1000;
 
-/** Сколько последних закрытых спринтов брать для порогов возраста задач (Work Item Age). */
-export const sprintHistoryCount = storage.defineItem<number>('sync:sprintHistoryCount', {
-  fallback: 6,
-});
-
 /** Целевой % Product на КВАРТАЛ (остальное = 100−product) + полуширина коридора (пп). */
 export interface QuarterTargetConfig {
   productPct: number;
@@ -145,8 +140,8 @@ export const themePreference = storage.defineItem<ThemePreference>('sync:themePr
 });
 
 /**
- * Статусы «реальной работы» и «завершено» для Work Item Age / cycle time.
- * Возраст считается от ПЕРВОГО входа в workStatuses (очередь типа Ready for DEV НЕ входит).
+ * Статусы «реальной работы» и «завершено» — для времени работы крупных задач в плане.
+ * Работа начинается с ПЕРВОГО входа в workStatuses (очередь типа Ready for DEV НЕ входит).
  * Дефолт — под ELCAS доску 80 (recon 2026-07-08; смешаны рус/англ имена статусов).
  */
 export interface StatusConfig {

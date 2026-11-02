@@ -1,5 +1,6 @@
 import type { SprintReportDetail, SprintReportIssue } from '@/core/domain';
 import { median } from './median';
+import { sprintCompletion } from './sprint-completion';
 
 /**
  * Правила «здоровья спринта» — ЧИСТЫЕ функции (тестируются без браузера). Слой: core/metrics.
@@ -54,7 +55,7 @@ export interface RuleResult {
   rule: RuleId;
   status: RuleStatus;
   /**
-   * Измеренное значение: доля (0.12 = 12%) для процентных правил, счётчик для `punted`.
+   * Измеренное значение: доля (0.12 = 12%). Для `punted` — доля SP выброшенного от объёма на старте.
    * null — статус no-data / insufficient-history.
    */
   value: number | null;
@@ -99,9 +100,12 @@ export interface HealthSettings {
   /** Объём задач, добавленных после старта, от объёма на старте, %. */
   scopeAddedPct: number;
   scopeAddedCritPct: number;
-  /** Сколько задач допустимо выбросить из спринта после старта (0 = ни одной). */
-  puntedCount: number;
-  puntedCritCount: number;
+  /**
+   * Выброшено после старта, % от объёма на старте (issue #27). Выше первого — жёлтый,
+   * от второго и выше — красный: 0 / 10 = «0% зелёный, до 10% жёлтый, от 10% красный».
+   */
+  puntedPct: number;
+  puntedCritPct: number;
   /** Размер окна для базы velocity (спринтов). */
   velocityWindow: number;
 }
@@ -116,8 +120,8 @@ export const DEFAULT_HEALTH_SETTINGS: Readonly<HealthSettings> = {
   reestimateCritPct: 20,
   scopeAddedPct: 10,
   scopeAddedCritPct: 20,
-  puntedCount: 0,
-  puntedCritCount: 3,
+  puntedPct: 0,
+  puntedCritPct: 10,
   velocityWindow: 6,
 };
 
@@ -137,18 +141,17 @@ export function withHealthDefaults(
 }
 
 /**
- * Привести настройки к корректным: без отрицательных, штуки/окно — целые, окно ≥ 2
+ * Привести настройки к корректным: без отрицательных, окно — целое и ≥ 2
  * (иначе «медиана» бессмысленна), второй порог не ниже первого (иначе жёлтой зоны нет,
  * а красный срабатывал бы раньше жёлтого).
  */
 export function normalizeHealthSettings(s: HealthSettings): HealthSettings {
   const pct = (v: number) => Math.max(0, v);
-  const count = (v: number) => Math.max(0, Math.round(v));
   const velocityDropPct = pct(s.velocityDropPct);
   const carryoverPct = pct(s.carryoverPct);
   const reestimatePct = pct(s.reestimatePct);
   const scopeAddedPct = pct(s.scopeAddedPct);
-  const puntedCount = count(s.puntedCount);
+  const puntedPct = pct(s.puntedPct);
   return {
     velocityDropPct,
     velocityDropCritPct: Math.max(velocityDropPct, pct(s.velocityDropCritPct)),
@@ -158,8 +161,8 @@ export function normalizeHealthSettings(s: HealthSettings): HealthSettings {
     reestimateCritPct: Math.max(reestimatePct, pct(s.reestimateCritPct)),
     scopeAddedPct,
     scopeAddedCritPct: Math.max(scopeAddedPct, pct(s.scopeAddedCritPct)),
-    puntedCount,
-    puntedCritCount: Math.max(puntedCount, count(s.puntedCritCount)),
+    puntedPct,
+    puntedCritPct: Math.max(puntedPct, pct(s.puntedCritPct)),
     velocityWindow: Math.max(2, Math.round(s.velocityWindow)),
   };
 }
@@ -176,8 +179,8 @@ export function toThresholds(saved: Partial<HealthSettings> | null | undefined):
     reestimateCrit: pct.reestimateCritPct / 100,
     scopeAdded: pct.scopeAddedPct / 100,
     scopeAddedCrit: pct.scopeAddedCritPct / 100,
-    punted: pct.puntedCount,
-    puntedCrit: pct.puntedCritCount,
+    punted: pct.puntedPct / 100,
+    puntedCrit: pct.puntedCritPct / 100,
     velocityWindow: pct.velocityWindow,
   };
 }
@@ -405,32 +408,46 @@ export function ruleScopeAdded(sprint: SprintReportDetail, t: HealthThresholds):
 }
 
 /**
- * 5. Выброс задач из спринта после старта. Порог по УМОЛЧАНИЮ 0 — правило бинарное
- * («из спринта ничего не выкидывали»), но настраиваемое на случай договорённости о допуске.
+ * 5. Выброс задач из спринта после старта: SP выброшенных / объём на старте (issue #27).
+ *
+ * Объём на старте — тот же, что «взяли» на странице спринтов (Jira Velocity Chart «Commitment»,
+ * см. sprintCompletion): оценки на старте задач, которые были в спринте к старту.
+ * Счётчик задач заменён долей: 1 задача на 1 SP и 1 задача на 13 SP — разный провал плана.
+ *
+ * Границы по issue #27: 0% — зелёный, выше первого порога — жёлтый, от второго порога
+ * и выше — красный (ровно 10% при пороге 10% — уже красный, в отличие от других правил).
  *
  * Пустой массив (выбросов не было) и отсутствие поля в ответе Jira — РАЗНЫЕ ситуации:
  * первое ok, второе no-data.
  */
 export function rulePunted(sprint: SprintReportDetail, t: HealthThresholds): RuleResult {
-  if (!sprint.hasPuntedData) {
-    return {
-      rule: 'punted',
-      status: 'no-data',
-      value: null,
-      threshold: t.punted,
-      critThreshold: t.puntedCrit,
-    };
-  }
-  const count = sprint.puntedIssues.length;
+  const noData: RuleResult = {
+    rule: 'punted',
+    status: 'no-data',
+    value: null,
+    threshold: t.punted,
+    critThreshold: t.puntedCrit,
+  };
+  if (!sprint.hasPuntedData) return noData;
+
+  const puntedPoints = sprint.puntedIssues.reduce((s, i) => s + points(i.points), 0);
+  const atStart = sprintCompletion(sprint).startPoints;
+  let share: number;
+  if (atStart > 0) share = round3(puntedPoints / atStart);
+  else if (puntedPoints === 0) share = 0;
+  else return noData; // выбросили, а базы на старте нет — долю не посчитать
+
+  const crit = Math.max(t.punted, t.puntedCrit);
+  const status = share >= crit - 1e-9 && share > 0 ? 'crit' : grade(share, t.punted, t.puntedCrit);
   return {
     rule: 'punted',
-    status: grade(count, t.punted, t.puntedCrit),
-    value: count,
+    status,
+    value: share,
     threshold: t.punted,
     critThreshold: t.puntedCrit,
     evidence: {
       issueKeys: sprint.puntedIssues.map((i) => i.key),
-      points: +sprint.puntedIssues.reduce((s, i) => s + points(i.points), 0).toFixed(1),
+      points: +puntedPoints.toFixed(1),
       issues: sprint.puntedIssues.map((i) => ({ key: i.key, points: points(i.points) })),
     },
   };

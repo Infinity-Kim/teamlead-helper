@@ -2,7 +2,6 @@
 import { ref, onMounted, computed } from 'vue';
 import {
   capTargets,
-  sprintHistoryCount,
   quarterTarget,
   quarterUiMode,
   statusConfig,
@@ -33,11 +32,10 @@ import {
 import { levelStyle } from '@/components/health-tone';
 
 const targets = ref<CapTargets>({ Product: 67, Tech: 16.5, Support: 16.5 });
-const historyN = ref(6);
 const qProduct = ref(67);
 const qBand = ref(5);
 const qMode = ref<QuarterUiMode>('topBoard');
-// Статусы для Work Item Age (в UI — строкой через запятую; в хранилище — массивы).
+// Статусы для времени работы крупных задач (в UI — строкой через запятую; в хранилище — массивы).
 const workStatuses = ref('');
 const doneStatuses = ref('');
 // Jira API для страницы отчёта по спринтам (Basic auth: email + токен).
@@ -195,11 +193,11 @@ const HEALTH_FIELDS: Array<{
     unit: '%',
   },
   {
-    warnKey: 'puntedCount',
-    critKey: 'puntedCritCount',
+    warnKey: 'puntedPct',
+    critKey: 'puntedCritPct',
     label: 'Выброшено из спринта',
-    hint: 'Сколько задач допустимо убрать из спринта после старта (0 — ни одной)',
-    unit: 'зад.',
+    hint: 'Объём задач, убранных из спринта после старта, от объёма на старте. Ровно второй порог - уже красный',
+    unit: '%',
   },
 ];
 
@@ -228,7 +226,6 @@ const QUARTER_MODES: { value: QuarterUiMode; label: string }[] = [
 
 onMounted(async () => {
   targets.value = await capTargets.getValue();
-  historyN.value = await sprintHistoryCount.getValue();
   const qt = await quarterTarget.getValue();
   qProduct.value = qt.productPct;
   qBand.value = qt.bandPp;
@@ -262,7 +259,6 @@ async function save() {
     })),
   );
   await capTargets.setValue(targets.value);
-  await sprintHistoryCount.setValue(Math.max(1, Math.round(historyN.value)));
   await quarterTarget.setValue({ productPct: qProduct.value, bandPp: qBand.value });
   await quarterUiMode.setValue(qMode.value);
   await statusConfig.setValue({
@@ -531,20 +527,6 @@ async function save() {
           Сумма: {{ sum }}%<span v-if="!sumValid"> — должно быть 100%</span>
         </p>
 
-        <label class="block border-t border-slate-200 pt-4 dark:border-slate-800">
-          <span class="mb-1 block text-sm font-medium">Спринтов истории для расчётов</span>
-          <input
-            v-model.number="historyN"
-            type="number"
-            min="1"
-            max="50"
-            class="w-24 rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-          />
-          <span class="mt-1 block text-xs text-slate-400">
-            Сколько последних закрытых спринтов брать для порогов возраста задач.
-          </span>
-        </label>
-
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="mb-2 text-sm font-semibold">Квартальный баланс</h2>
           <div class="grid grid-cols-2 gap-3">
@@ -607,14 +589,13 @@ async function save() {
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
-          <h2 class="mb-1 text-sm font-semibold">Возраст задач (Work Item Age)</h2>
+          <h2 class="mb-1 text-sm font-semibold">Статусы задач</h2>
           <p class="mb-3 text-xs text-slate-400">
-            Задачи, которые давно «в работе», подсвечиваются на доске. Возраст считается с момента
-            входа в один из статусов «в работе». Пороги («стареет» / «застряла») берутся из истории
-            команды автоматически. Статусы — через запятую, регистр не важен.
+            По ним план считает время работы крупных задач (от 13 SP). Статусы через запятую,
+            регистр не важен.
           </p>
           <label class="block">
-            <span class="mb-1 block text-xs font-medium">Статусы «в работе» (старт возраста)</span>
+            <span class="mb-1 block text-xs font-medium">Статусы «в работе»</span>
             <input
               v-model="workStatuses"
               type="text"
@@ -622,8 +603,8 @@ async function save() {
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
             <span class="mt-1 block text-xs text-slate-400">
-              Первый вход в любой из этих статусов = начало работы. Очередь на разработку (напр.
-              «Ready for DEV») сюда НЕ включать — иначе возраст раздуется ожиданием.
+              Первый вход в любой из этих статусов - начало работы. Очередь на разработку, например
+              «Ready for DEV», сюда не включать: время ожидания засчитается в работу.
             </span>
           </label>
           <label class="mt-3 block">
@@ -635,8 +616,7 @@ async function save() {
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
             <span class="mt-1 block text-xs text-slate-400">
-              Для расчёта времени цикла (start → done) по закрытым задачам — от него зависят пороги
-              возраста.
+              Вход в любой из этих статусов - конец работы над задачей.
             </span>
           </label>
         </div>
@@ -645,8 +625,8 @@ async function save() {
           <h2 class="mb-1 text-sm font-semibold">Здоровье спринта (пороги)</h2>
           <p class="mb-3 text-xs text-slate-400">
             Правила на странице «Отчёт по спринтам»: за первым порогом чип спринта жёлтый, за вторым
-            — красный. Граница включительно: ровно на пороге — ещё норма. Это ориентиры для
-            планирования, а не оценка команды — меняйте под свои договорённости.
+            — красный. Ровно на пороге - ещё норма, кроме «выброшено»: там второй порог уже красный.
+            Это ориентиры для планирования, а не оценка команды — меняйте под свои договорённости.
           </p>
           <div
             class="mb-1 grid grid-cols-[minmax(0,1fr)_5rem_5rem_2.5rem] items-end gap-x-2 text-[11px] text-slate-400"
