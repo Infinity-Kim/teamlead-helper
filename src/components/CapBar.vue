@@ -1,7 +1,7 @@
 <script lang="ts" setup>
 import { computed } from 'vue';
 import type { SprintCapStats, CapSlice } from '@/core/domain';
-import { describePlan, type PlanCapacity } from '@/core/metrics';
+import type { PlanCapacity } from '@/core/metrics';
 import { ADS, BUCKET_COLORS } from './ads-tokens';
 import InfoTip from './InfoTip.vue';
 
@@ -29,10 +29,11 @@ const segments = computed(() =>
     .map((b) => ({ ...b, color: BUCKET_COLORS[b.bucket] })),
 );
 const hasData = computed(() => props.stats.totalPoints > 0);
+/** Перекос словами: какая метка и в какую сторону. Число - в легенде у метки. */
 const skewLabel = computed(() => {
   const s = props.stats.topSkew;
   if (!s) return null;
-  return `${s.bucket} ${s.deltaPp > 0 ? '+' : ''}${s.deltaPp}%`;
+  return `${s.bucket} ${s.deltaPp > 0 ? 'выше' : 'ниже'} цели`;
 });
 
 /** Позиция маркера рекомендуемого плана на полосе, % от объёма спринта. null — не рисуем. */
@@ -44,8 +45,20 @@ const planPct = computed(() => {
 const overPlan = computed(
   () => props.plan != null && props.stats.totalPoints > props.plan.recommended,
 );
-/** Подсказка к плану — только «можно чуть больше». */
-const planTitle = computed(() => (props.plan ? describePlan(props.plan) : ''));
+/** Цель выполнения плана в процентах (80 при переносе до 20%). */
+const targetPct = computed(() => Math.round((props.plan?.targetCompletion ?? 0.8) * 100));
+/** Подсказка к плану: 2 строки, подробности - на странице отчёта «как посчитано». */
+const planTitle = computed(() => {
+  const p = props.plan;
+  if (!p) return '';
+  return (
+    `Берите до ${p.recommended} SP: цель - закрыть ${targetPct.value}% взятого в 4 спринтах из 5.\n` +
+    `Посчитано по ${p.count} последним спринтам, с риском - до ${p.stretch} SP.`
+  );
+});
+
+/** Подпись метки в легенде: у задач без CAP-метки своей метки в Jira нет. */
+const bucketLabel = (b: CapSlice) => (b === 'Unlabeled' ? 'Без метки' : b);
 
 // --- ADS-токены (общие для виджетов, см. ads-tokens.ts) ---
 const T = ADS;
@@ -63,7 +76,13 @@ const S = {
     padding: '4px 8px 8px',
     boxSizing: 'border-box' as const,
   },
-  head: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' },
+  head: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    alignItems: 'center',
+    gap: '2px 8px',
+    marginBottom: '4px',
+  },
   track: {
     position: 'relative' as const,
     display: 'flex',
@@ -162,14 +181,19 @@ function dot(bucket: CapSlice) {
       >
         Capacity
         <InfoTip
-          title="Баланс работы спринта (CAP-микс)"
-          what="Как распределены story points спринта по типам работы: Product / Tech / Support."
-          how="Сумма SP задач каждого типа ÷ весь размеченный объём. Цель и коридор задаются в настройках."
-          read="Полоса = факт, чёрточка = цель Product. Дельта в пп (±) у чипа = отклонение от цели. «План ≤ N SP» (пунктир) — сколько брать на старте, чтобы закрыть 80%+ с учётом прилётов. ↗ — команда растёт."
-          plan="Держите Product около цели. Взяли больше «плана» — скорее всего не закроете 80%."
+          title="Баланс спринта по меткам"
+          what="Доли SP спринта по меткам Product, Tech и Support. Пример: в спринте 40 SP, Product 26 - доля 65%."
+          read="Чёрная черта - цель Product, пунктир - план на старт. «-19 пп» у метки - доля на 19 процентных пунктов ниже цели, показываем от 5."
+          :plan="
+            plan
+              ? `Взяли больше плана - скорее всего, закроете меньше ${targetPct}% взятого.`
+              : undefined
+          "
         />
       </span>
-      <span :style="{ color: T.subtle }">{{ stats.totalPoints }} SP</span>
+      <span :style="{ color: T.subtle, whiteSpace: 'nowrap' }"
+        >в спринте {{ stats.totalPoints }} SP</span
+      >
       <span
         v-if="plan !== null"
         :style="{
@@ -177,18 +201,27 @@ function dot(bucket: CapSlice) {
           display: 'inline-flex',
           alignItems: 'center',
           gap: '3px',
+          whiteSpace: 'nowrap',
         }"
         :title="planTitle"
       >
         <span
           :style="{ borderLeft: '2px dashed currentColor', height: '9px', display: 'inline-block' }"
         />
-        план ≤ {{ plan.recommended }} SP<template v-if="plan.trend?.active">
-          {{ plan.trend.slope > 0 ? '↗' : '↘' }}</template
-        >
+        план до {{ plan.recommended }} SP
       </span>
-      <span v-if="skewLabel" :style="{ color: T.danger, fontWeight: 600 }">⚠ {{ skewLabel }}</span>
-      <span v-else-if="hasData" :style="{ color: T.success }">✓ в норме</span>
+      <span
+        v-if="skewLabel"
+        :style="{ color: T.danger, fontWeight: 600, whiteSpace: 'nowrap' }"
+        :title="`Доля ${stats.topSkew!.bucket} отличается от цели на ${Math.abs(stats.topSkew!.deltaPp)} процентных пунктов, норма - до 5`"
+        >⚠ {{ skewLabel }}</span
+      >
+      <span
+        v-else-if="hasData"
+        :style="{ color: T.success, whiteSpace: 'nowrap' }"
+        title="Доли Product, Tech и Support отличаются от цели меньше чем на 5 процентных пунктов"
+        >✓ баланс в норме</span
+      >
 
       <span
         :style="{ display: 'inline-flex', alignItems: 'center', gap: '8px', marginLeft: 'auto' }"
@@ -197,10 +230,10 @@ function dot(bucket: CapSlice) {
         <span
           v-if="activeBuckets.length"
           :style="{ color: T.subtlest, cursor: 'pointer' }"
-          title="Сбросить все фильтры"
+          title="Показать на доске все задачи"
           @click="emit('clearAll')"
         >
-          ✕ сбросить
+          ✕ сбросить фильтр
         </span>
         <span
           :style="{
@@ -231,7 +264,7 @@ function dot(bucket: CapSlice) {
           borderTopRightRadius: i === segments.length - 1 ? '4px' : '0',
           borderBottomRightRadius: i === segments.length - 1 ? '4px' : '0',
         }"
-        :title="`${seg.bucket}: ${seg.points} SP (${seg.pct}%)`"
+        :title="`${bucketLabel(seg.bucket)}: ${seg.points} SP, ${seg.pct}% SP спринта`"
       />
       <div :style="S.target(targetProductPct)" :title="`Цель Product: ${targetProductPct}%`" />
       <div v-if="planPct !== null" :style="S.planMark(planPct)" :title="planTitle" />
@@ -249,7 +282,7 @@ function dot(bucket: CapSlice) {
         @click="emit('bucketClick', b.bucket)"
       >
         <i :style="dot(b.bucket)" />
-        {{ b.bucket }} {{ b.pct }}%
+        {{ bucketLabel(b.bucket) }} {{ b.pct }}%
         <em
           v-if="b.deltaPp !== null && Math.abs(b.deltaPp) >= 5"
           :style="{
@@ -257,9 +290,9 @@ function dot(bucket: CapSlice) {
             color: isActive(b.bucket) ? 'inherit' : b.deltaPp > 0 ? T.danger : T.information,
             fontStyle: 'normal',
           }"
-          :title="`Отклонение от цели: ${b.deltaPp > 0 ? '+' : ''}${b.deltaPp} процентных пунктов`"
+          :title="`${b.deltaPp > 0 ? 'Выше' : 'Ниже'} цели на ${Math.abs(b.deltaPp)} процентных пунктов`"
         >
-          ({{ b.deltaPp > 0 ? '+' : '' }}{{ b.deltaPp }}%)
+          ({{ b.deltaPp > 0 ? '+' : '' }}{{ b.deltaPp }} пп)
         </em>
       </span>
     </div>

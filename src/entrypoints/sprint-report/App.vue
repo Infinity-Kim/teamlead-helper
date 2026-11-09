@@ -18,6 +18,8 @@ import {
   sprintHealthColors,
   type QuarterTargetConfig,
   readSprintCache,
+  readChangelogCache,
+  writeChangelogCache,
   writeSprintCache,
 } from '@/shared/storage';
 import {
@@ -37,7 +39,6 @@ import {
   planCapacity,
   sprintFlows,
   type SprintFlow,
-  describePlan,
   explainPlan,
   issueInSlice,
   healthBySprint,
@@ -47,9 +48,7 @@ import {
   type HealthColors,
   divisionQuarters,
   completionRates,
-  sprintCompletion,
   nextQuarter,
-  CAP_SLICES,
   type QuarterGroup,
   type VelocitySummary,
   type PlanCapacity,
@@ -126,9 +125,13 @@ function planFor(flows: readonly SprintFlow[], t: HealthThresholds): PlanCapacit
   return planCapacity(flows, 1 - t.carryover);
 }
 
-/** Расшифровка плана для подсказки — общий текст с бэклогом + куда смотреть подробнее. */
+/** Подсказка плана в 2 строки на числах команды; подробный разбор - по ссылке «как посчитано». */
 function planTitle(p: PlanCapacity): string {
-  return `${describePlan(p)}\n\nПодробно, с графиками и формулами — «как посчитано →».`;
+  return (
+    `До ${p.recommended} SP: цель - закрыть ${Math.round(p.targetCompletion * 100)}% взятого в 4 спринтах из 5, ` +
+    `с учётом ${p.medianAdded} SP, которые обычно добавляют по ходу.\n` +
+    `С риском - до ${p.stretch} SP. Как часто цель сбывалась - в «как посчитано».`
+  );
 }
 
 /** Собрать TeamReport из сырья спринтов. */
@@ -292,9 +295,8 @@ async function ensureAccess(): Promise<boolean> {
   waitingTab.value = false;
   if (!ready) {
     error.value = present
-      ? 'Вкладка Jira ещё не загрузилась. Дождитесь, пока откроется доска, и нажмите «Повторить».'
-      : 'Нет доступа к Jira. Либо откройте вкладку Jira в этом браузере (тогда токен не нужен), ' +
-        'либо укажите email и API-токен в настройках расширения.';
+      ? 'Вкладка Jira ещё грузится. Дождитесь доски и нажмите «Повторить».'
+      : 'Нет доступа к Jira. Откройте Jira в этом браузере или добавьте API-токен в настройках.';
     return false;
   }
   setJiraAuth(null);
@@ -305,7 +307,8 @@ async function ensureAccess(): Promise<boolean> {
 
 /**
  * Отчёт одной команды. Отчёты закрытых спринтов кешируются БЕССРОЧНО по sprintId, поэтому
- * сеть трогается только для новых спринтов: первое открытие ~14 запросов, дальше — 2 + 0–1.
+ * сеть трогается только для новых спринтов: первое открытие ~14 запросов, дальше - 2 + 0-1.
+ * История статусов задач от 3 SP: первое открытие 210-270 запросов, дальше 5-35 (changelog-cache).
  * fresh — перезапросить все отчёты (кнопка «Обновить»): метки и оценки правят и после
  * закрытия спринта. Кеш и тогда передаётся — как запасной вариант при сбое запроса.
  */
@@ -319,12 +322,21 @@ async function loadTeam(team: TeamBoard, fresh: boolean): Promise<TeamReport> {
     fresh,
   );
   await writeSprintCache(fetched);
-  // План — по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии. Крупные
-  // задачи (≥ 13 SP) идут по два спринта — их SP разносим по времени работы над ними.
+  // План - по тем же спринтам, что и отчёт (с появления CAP-меток), в хронологии. Задачи
+  // от 3 SP часто идут дольше спринта - их SP разносим по времени работы над ними. История
+  // статусов закрытых задач - из постоянного кэша, из Jira только новые и незакрытые.
   const status = await statusConfig.getValue();
-  const work = await getBigTaskWork(sprints, status.workStatuses, status.doneStatuses).catch(
-    () => new Map(),
-  );
+  const work = await getBigTaskWork(
+    sprints,
+    status.workStatuses,
+    status.doneStatuses,
+    await readChangelogCache(),
+  )
+    .then(async (r) => {
+      await writeChangelogCache(r.fetchedClosed);
+      return r.work;
+    })
+    .catch(() => new Map());
   const flows = sprintFlows([...sprints].reverse(), work);
   const built = buildReport(team, sprints, failed, flows, calendar);
   memCache.set(team.rapidViewId, built);
@@ -394,14 +406,14 @@ function errorText(e: unknown): string {
   if (e instanceof JiraRequestError) {
     if (e.error.kind === 'unauthorized') {
       return usingTab.value
-        ? 'Jira отклонила запрос (401/403). Похоже, сессия на вкладке Jira истекла — обновите вкладку и войдите заново.'
-        : 'Jira отклонила запрос (401/403). Проверьте email и API-токен в настройках.';
+        ? 'Jira не пускает: сессия на вкладке истекла. Обновите вкладку Jira и войдите.'
+        : 'Jira не принимает email или API-токен. Проверьте их в настройках.';
     }
     if (e.error.kind === 'not-configured') {
-      return 'Вкладка Jira не отвечает. Откройте её, дождитесь загрузки доски и нажмите «Повторить». Либо укажите API-токен в настройках — тогда вкладка не нужна.';
+      return 'Вкладка Jira не отвечает. Откройте доску в Jira и нажмите «Повторить».';
     }
     if (e.error.kind === 'rate-limited') {
-      return 'Jira ограничила частоту запросов. Подождите минуту и нажмите «Повторить» — уже загруженные спринты сохранены.';
+      return 'Jira ограничила частоту запросов. Подождите минуту и нажмите «Повторить».';
     }
   }
   return `Ошибка загрузки: ${String(e)}`;
@@ -516,19 +528,20 @@ function inProgress(q: DivisionQuarter): boolean {
   );
 }
 
-/** Доля 0..∞ → «94%»; нет базы → «—». */
-const fmtRate = (r: number | null) => (r === null ? '—' : `${Math.round(r * 100)}%`);
+/** Доля 0..∞ → «94%»; нет базы → «-». */
+const fmtRate = (r: number | null) => (r === null ? '-' : `${Math.round(r * 100)}%`);
 
-/** Подсказка с исходными числами закрытия: откуда взялись проценты. */
+/** Подсказка процентов закрытия на исходных числах: 2 строки. */
 function completionHint(c: CompletionRates): string {
   return (
-    `Взяли на старте ${fmtNum(c.startPoints)} SP, к концу стало ${fmtNum(c.finalPoints)} SP ` +
-    `(с докинутым после старта), закрыли ${fmtNum(c.completedPoints)} SP.\n` +
-    `От взятого: ${fmtRate(c.ofStart)} — выполнили ли обещанное на планировании ` +
-    `(больше 100% — закрыли и часть докинутого).\n` +
-    `От итога: ${fmtRate(c.ofFinal)} — сколько успели из всего, что оказалось в спринте; ` +
-    `остальное переехало.`
+    `Взяли ${fmtNum(c.startPoints)} SP на старте, к концу стало ${fmtNum(c.finalPoints)} SP: с добавленными, без выброшенных.\n` +
+    `Закрыли ${fmtNum(c.completedPoints)} SP: ${fmtRate(c.ofStart)} взятого, ${fmtRate(c.ofFinal)} к концу.`
   );
+}
+
+/** Подпись доли CAP в баре: сколько SP и какой процент от всех закрытых SP. */
+function sliceTitle(sh: { slice: CapSlice; points: number; pct: number }): string {
+  return `${SLICE_LABEL[sh.slice]}: ${fmtNum(sh.points)} SP закрытых задач, ${sh.pct}% от всех закрытых SP`;
 }
 
 /** Product-доля квартала против цели из настроек: в коридоре или нет. */
@@ -576,10 +589,9 @@ function evidenceLevel(r: RuleResult): HealthLevel {
   return r.status === 'crit' || r.status === 'warn' ? r.status : 'ok';
 }
 
-/** «30% при порогах 20% / 30%» — значение правила против жёлтого и красного порога. */
-function evidenceLimits(r: RuleResult): string {
-  const pct = (v: number) => `${Math.round(Math.abs(v) * 100)}%`;
-  return `${pct(r.value ?? 0)} при порогах ${pct(r.threshold)} / ${pct(r.critThreshold)}`;
+/** Значение правила в процентах для подписи раскрытого списка; пороги - в настройках. */
+function evidencePct(r: RuleResult): string {
+  return `${Math.round(Math.abs(r.value ?? 0) * 100)}%`;
 }
 
 /**
@@ -601,10 +613,10 @@ function evidenceCards(s: SprintReportDetail) {
   return ev.issues.map((e) => ({ ...e, issue: pool.get(e.key) ?? null }));
 }
 
-/** Подпись вклада задачи в метрику: для переоценки «3 → 8 SP», иначе просто SP. */
+/** Подпись вклада задачи в метрику: для переоценки «было 3, стало 8 SP (+5)», иначе просто SP. */
 function contribution(e: { points: number; from?: number | null; to?: number }): string {
   if (typeof e.to === 'number' && typeof e.from === 'number') {
-    return `${fmtNum(e.from)} → ${fmtNum(e.to)} SP  (+${fmtNum(e.points)})`;
+    return `было ${fmtNum(e.from)}, стало ${fmtNum(e.to)} SP (+${fmtNum(e.points)})`;
   }
   return `${fmtNum(e.points)} SP`;
 }
@@ -636,16 +648,11 @@ function quarterLabel(q: string): string {
   return `${quarter} ${year}`;
 }
 
-/** SP → строка (— если оценки нет). */
-const fmtSp = (p: number | null) => (p === null ? '—' : String(p));
+/** SP → строка (- если оценки нет). */
+const fmtSp = (p: number | null) => (p === null ? '-' : String(p));
 
 /** Число без лишнего .0 (68 вместо 68.0, но 12.5 сохраняем). */
-const fmtNum = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
-
-/** Переоценка спринта: сколько SP добавилось после старта (current − initial). */
-function reestimate(s: SprintReportDetail): number {
-  return s.completedPoints - s.completedInitialPoints;
-}
+const fmtNum = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(1).replace('.', ','));
 
 /** Только слайсы с ненулевой долей — для компактного бара/легенды. */
 function nonEmpty(b: CapBreakdown) {
@@ -680,9 +687,6 @@ function capLabel(issue: SprintReportIssue): string | null {
   const cap = issue.labels.find((l) => l.toLowerCase().startsWith('cap_'));
   return cap ? cap.replace(/^CAP_/i, '') : null;
 }
-
-// экспортируем в шаблон
-const CAP_SLICES_ALL = CAP_SLICES;
 </script>
 
 <template>
@@ -698,7 +702,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
         <div class="flex-1">
           <h1 class="text-lg font-semibold">Отчёт по спринтам</h1>
           <p class="text-sm text-slate-500 dark:text-slate-400">
-            Спринты с Q4 2025 по кварталам · сводка дивизиона и команд · CAP-микс · velocity.
+            Закрытые спринты с Q4 2025: сколько команды закрывают и на что тратят SP.
           </p>
         </div>
         <button
@@ -779,30 +783,14 @@ const CAP_SLICES_ALL = CAP_SLICES;
         </a>
       </div>
 
-      <!-- Общая легенда бакетов -->
-      <div
-        v-if="
-          !loading && !error && (view === 'division' ? division?.quarters.length : totalSprints)
-        "
-        class="mb-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500 dark:text-slate-400"
-      >
-        <span v-for="slice in CAP_SLICES_ALL" :key="slice" class="inline-flex items-center gap-1.5">
-          <span
-            class="inline-block size-2.5 rounded-sm"
-            :style="{ background: sliceColor(slice) }"
-          />
-          {{ SLICE_LABEL[slice] }}
-        </span>
-      </div>
-
       <!-- Режим без токена: данные идут через открытую вкладку Jira -->
       <div
         v-if="usingTab && !error"
         class="mb-4 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400"
       >
         <span class="inline-block size-1.5 rounded-full bg-emerald-500"></span>
-        Работаем через открытую вкладку Jira (сессия браузера) — API-токен не нужен. Если закрыть
-        её, добавьте токен в настройках.
+        Данные идут через открытую вкладку Jira. Не закрывайте её или добавьте API-токен в
+        настройках.
       </div>
 
       <!-- Плашка частичных данных: часть спринтов не догрузилась (rate-limit/сеть) -->
@@ -811,9 +799,8 @@ const CAP_SLICES_ALL = CAP_SLICES;
         class="mb-4 flex items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950 dark:text-amber-200"
       >
         <span class="flex-1">
-          Загружены не все спринты: {{ failedCount }}
-          {{ failedCount === 1 ? 'спринт не удалось' : 'спринтов не удалось' }} получить
-          (ограничение частоты запросов Jira). Квартальные цифры могут быть неполными.
+          Jira ограничила частоту запросов, не загрузилось спринтов: {{ failedCount }}. Цифры
+          кварталов неполные.
         </span>
         <button
           type="button"
@@ -843,18 +830,17 @@ const CAP_SLICES_ALL = CAP_SLICES;
       <!-- Загрузка -->
       <div v-else-if="loading" class="py-16 text-center text-sm text-slate-400">
         <template v-if="waitingTab">
-          Ждём загрузки вкладки Jira — через неё идут запросы, пока не задан API-токен…
+          Ждём вкладку Jira: без API-токена данные идут через неё…
         </template>
         <template v-else>
-          Загружаем отчёты по спринтам…
+          Загружаем спринты…
           <template v-if="progress">{{ progress }}</template>
-          <template v-else>(все закрытые спринты с Q4 2025)</template>
         </template>
       </div>
 
       <!-- Нет команд: всё выключено или дивизион пуст -->
       <div v-else-if="!currentTeams.length" class="py-16 text-center text-sm text-slate-400">
-        В дивизионе нет включённых команд. Добавьте их в
+        В дивизионе нет включённых команд. Включите их в
         <a
           href="/options.html"
           target="_blank"
@@ -880,24 +866,23 @@ const CAP_SLICES_ALL = CAP_SLICES;
               <span
                 v-if="inProgress(q)"
                 class="rounded bg-sky-50 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950 dark:text-sky-300"
-                :title="`Квартал ещё идёт: хотя бы у одной команды впереди спринты, которые закончатся в этом квартале. Учтены только закрытые спринты.`"
+                title="В квартале ещё будут спринты. Цифры - по уже закрытым."
               >
                 идёт
               </span>
               <span class="text-xs text-slate-500 dark:text-slate-400">
-                {{ q.sprintCount }} спр. ·
+                {{ q.sprintCount }} спр. · закрыто
                 <b class="text-slate-700 dark:text-slate-200">{{ fmtNum(q.completedSp) }} SP</b>
-                закрыто
                 <span :title="completionHint(q.completion)" class="cursor-help">
                   ·
                   <b class="text-slate-700 dark:text-slate-200">{{
                     fmtRate(q.completion.ofStart)
                   }}</b>
-                  от взятого ·
+                  взятого ·
                   <b class="text-slate-700 dark:text-slate-200">{{
                     fmtRate(q.completion.ofFinal)
                   }}</b>
-                  от итога
+                  к концу
                 </span>
               </span>
               <span
@@ -907,7 +892,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     ? 'text-emerald-700 dark:text-emerald-400'
                     : 'text-amber-700 dark:text-amber-400'
                 "
-                :title="`Цель Product ${target.productPct}% ±${target.bandPp} пп (настраивается в «Квартальный баланс»)`"
+                :title="`Доля закрытых SP с меткой Product. Цель ${target.productPct - target.bandPp}-${target.productPct + target.bandPp}%, меняется в настройках.`"
               >
                 Product {{ productStatus(q.breakdown).pct }}%
                 <template v-if="productStatus(q.breakdown).ok">· в цели</template>
@@ -922,9 +907,8 @@ const CAP_SLICES_ALL = CAP_SLICES;
               v-if="q.quarter === division?.quarters[0]?.quarter && !inProgress(q)"
               class="-mt-1 mb-2 text-[11px] text-slate-400"
             >
-              Все спринты квартала закрыты.
-              {{ quarterLabel(nextQuarter(q.quarter)) }}
-              появится здесь, когда закроется его первый спринт — в отчёт попадают только закрытые.
+              {{ quarterLabel(nextQuarter(q.quarter)) }} появится, когда закроется его первый
+              спринт.
             </p>
 
             <!-- CAP-микс дивизиона + метка цели Product -->
@@ -935,7 +919,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   :key="sh.slice"
                   class="h-full"
                   :style="{ width: sh.pct + '%', background: sliceColor(sh.slice) }"
-                  :title="`${SLICE_LABEL[sh.slice]}: ${fmtNum(sh.points)} SP (${sh.pct}%)`"
+                  :title="sliceTitle(sh)"
                 />
               </div>
               <div
@@ -957,7 +941,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   :style="{ background: sliceColor(sh.slice) }"
                 />
                 {{ SLICE_LABEL[sh.slice] }} {{ sh.pct }}%
-                <span class="text-slate-400">({{ fmtNum(sh.points) }})</span>
               </span>
             </div>
           </div>
@@ -969,30 +952,37 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 class="border-t border-slate-100 text-left font-mono text-[11px] uppercase tracking-wide text-slate-400 dark:border-slate-800"
               >
                 <th class="py-2 pl-4 pr-2 font-normal">Команда</th>
-                <th class="px-2 py-2 text-right font-normal">Спр.</th>
-                <th class="px-2 py-2 text-right font-normal">SP</th>
+                <th class="px-2 py-2 text-right font-normal" title="Закрытых спринтов в квартале">
+                  Спр.
+                </th>
+                <th class="px-2 py-2 text-right font-normal" title="Закрыто SP за квартал">SP</th>
                 <th
                   class="px-2 py-2 text-right font-normal"
-                  title="Доля команды в закрытом объёме дивизиона"
+                  title="Доля команды в SP, закрытых дивизионом за квартал"
                 >
                   Доля
                 </th>
-                <th class="px-2 py-2 text-right font-normal" title="Среднее закрытое за спринт">
+                <th class="px-2 py-2 text-right font-normal" title="Закрыто SP в среднем за спринт">
                   SP/спр.
                 </th>
                 <th
                   class="px-2 py-2 text-right font-normal normal-case"
-                  title="Закрыто ÷ взято на старте спринтов. Больше 100% — закрыли и часть докинутого после старта"
+                  title="Закрыли из взятого на старте. Пример: взяли 100, закрыли 90 - 90%"
                 >
                   % взятого
                 </th>
                 <th
                   class="px-2 py-2 text-right font-normal normal-case"
-                  title="Закрыто ÷ итоговый объём спринтов (взятое + докинутое). Остальное переехало"
+                  title="Закрыли из объёма к концу, с добавленным. Пример: стало 120, закрыли 90 - 75%"
                 >
-                  % итога
+                  % к концу
                 </th>
-                <th class="w-2/5 py-2 pl-2 pr-4 font-normal">CAP-микс</th>
+                <th
+                  class="w-2/5 py-2 pl-2 pr-4 font-normal"
+                  title="Как закрытые SP делятся по CAP-меткам задач"
+                >
+                  CAP-микс
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -1005,7 +995,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   <button
                     type="button"
                     class="font-medium text-indigo-600 hover:underline dark:text-indigo-400"
-                    :title="`Открыть отчёт команды ${t.team}`"
                     @click="selectView(t.rapidViewId)"
                   >
                     {{ t.team }}
@@ -1021,7 +1010,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                   {{ shareOf(q, t.completedSp) }}%
                 </td>
                 <td class="px-2 py-2 text-right tabular-nums text-slate-500 dark:text-slate-400">
-                  {{ t.spPerSprint === null ? '—' : fmtNum(t.spPerSprint) }}
+                  {{ t.spPerSprint === null ? '-' : fmtNum(t.spPerSprint) }}
                 </td>
                 <td
                   class="cursor-help px-2 py-2 text-right tabular-nums"
@@ -1045,7 +1034,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         :key="sh.slice"
                         class="h-full"
                         :style="{ width: sh.pct + '%', background: sliceColor(sh.slice) }"
-                        :title="`${SLICE_LABEL[sh.slice]}: ${fmtNum(sh.points)} SP (${sh.pct}%)`"
+                        :title="sliceTitle(sh)"
                       />
                     </span>
                     <span
@@ -1055,7 +1044,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           ? 'text-slate-500 dark:text-slate-400'
                           : 'text-amber-700 dark:text-amber-400'
                       "
-                      :title="`Доля Product у команды; цель ${target.productPct}% ±${target.bandPp} пп`"
+                      :title="`Доля Product в закрытых SP. Оранжевым - вне цели ${target.productPct - target.bandPp}-${target.productPct + target.bandPp}%`"
                     >
                       Product {{ productStatus(t.breakdown).pct }}%
                     </span>
@@ -1094,39 +1083,35 @@ const CAP_SLICES_ALL = CAP_SLICES;
           <!-- Шапка команды + velocity -->
           <div class="mb-3 flex flex-wrap items-baseline gap-x-3 gap-y-1">
             <h2 class="text-base font-semibold">{{ report.team }}</h2>
-            <span class="font-mono text-xs text-slate-400">board {{ report.rapidViewId }}</span>
             <span class="ml-auto text-xs text-slate-500 dark:text-slate-400">
               <template v-if="report.velocity.median !== null">
                 <span
-                  title="Медиана и среднее completed SP по последним спринтам, ВКЛЮЧАЯ самый свежий. Правило «Скорость» у каждого спринта сравнивает его с медианой ПРЕДЫДУЩИХ — поэтому там другое число."
+                  class="cursor-help"
+                  :title="`Медиана закрытых SP за ${report.velocity.count} последних спринтов`"
                 >
-                  velocity (посл. {{ report.velocity.count }}, вкл. текущий):
+                  закрывает
                   <b class="text-slate-700 dark:text-slate-200">
-                    медиана {{ fmtNum(report.velocity.median) }} SP
+                    {{ fmtNum(report.velocity.median) }} SP
                   </b>
-                  · среднее {{ fmtNum(report.velocity.mean!) }} SP
+                  за спринт
                 </span>
-                <span v-if="report.plan" :title="planTitle(report.plan)">
-                  · план на старт
+                <span v-if="report.plan" class="cursor-help" :title="planTitle(report.plan)">
+                  · брать в следующий
                   <b class="text-slate-700 dark:text-slate-200">
-                    ≤ {{ report.plan.recommended }} SP
+                    до {{ report.plan.recommended }} SP
                   </b>
-                  <template v-if="report.plan.trend?.active">
-                    {{ report.plan.trend.slope > 0 ? '↗' : '↘' }}
-                  </template>
-                  · вызов {{ report.plan.stretch }}
+                  · с риском до {{ report.plan.stretch }}
                   ·
                   <a
                     :href="explainHref"
                     target="_blank"
                     class="text-[#1558bc] hover:underline dark:text-[#669df1]"
-                    title="Разбор плана по шагам: формулы, графики, проверка на истории команды"
                   >
-                    как посчитано →
+                    как посчитано
                   </a>
                 </span>
               </template>
-              <template v-else>velocity: нет данных</template>
+              <template v-else>скорость появится после первого закрытого спринта</template>
             </span>
           </div>
 
@@ -1151,23 +1136,20 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 <b class="text-slate-700 dark:text-slate-200">{{
                   fmtRate(completionRates(q.sprints).ofStart)
                 }}</b>
-                от взятого ·
+                взятого ·
                 <b class="text-slate-700 dark:text-slate-200">{{
                   fmtRate(completionRates(q.sprints).ofFinal)
                 }}</b>
-                от итога
+                к концу
               </div>
               <!-- Стек-бар -->
-              <div
-                class="flex h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800"
-                :title="`${quarterLabel(q.quarter)} — CAP-микс`"
-              >
+              <div class="flex h-2.5 overflow-hidden rounded-full bg-slate-100 dark:bg-slate-800">
                 <div
                   v-for="s in nonEmpty(q.breakdown)"
                   :key="s.slice"
                   class="h-full"
                   :style="{ width: s.pct + '%', background: sliceColor(s.slice) }"
-                  :title="`${SLICE_LABEL[s.slice]}: ${fmtNum(s.points)} SP (${s.pct}%)`"
+                  :title="sliceTitle(s)"
                 />
               </div>
               <!-- Числа под баром -->
@@ -1184,7 +1166,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                     :style="{ background: sliceColor(s.slice) }"
                   />
                   {{ SLICE_LABEL[s.slice] }} {{ s.pct }}%
-                  <span class="text-slate-400">({{ fmtNum(s.points) }})</span>
                 </span>
               </div>
             </div>
@@ -1202,7 +1183,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                 </span>
                 <span class="text-sm font-medium">{{ quarterLabel(q.quarter) }}</span>
                 <span class="text-xs text-slate-400">
-                  · {{ q.sprints.length }} спринтов · {{ fmtNum(q.completedSp) }} SP
+                  · {{ q.sprints.length }} спр. · {{ fmtNum(q.completedSp) }} SP
                 </span>
               </button>
 
@@ -1234,12 +1215,12 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           :key="cs.slice"
                           class="h-full"
                           :style="{ width: cs.pct + '%', background: sliceColor(cs.slice) }"
-                          :title="`${SLICE_LABEL[cs.slice]}: ${fmtNum(cs.points)} SP (${cs.pct}%)`"
+                          :title="sliceTitle(cs)"
                         />
                       </span>
 
                       <!-- Completed SP -->
-                      <span class="flex items-baseline gap-1">
+                      <span class="flex items-baseline gap-1" title="Закрыто SP за спринт">
                         <span
                           class="text-lg font-bold tabular-nums text-emerald-600 dark:text-emerald-400"
                         >
@@ -1248,21 +1229,10 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         <span class="text-xs text-slate-400">SP</span>
                       </span>
 
-                      <!-- Переоценка -->
                       <span
-                        v-if="reestimate(s) !== 0"
-                        class="rounded px-1.5 py-0.5 font-mono text-[11px]"
-                        :class="
-                          reestimate(s) > 0
-                            ? 'bg-sky-50 text-sky-600 dark:bg-sky-950 dark:text-sky-300'
-                            : 'bg-slate-100 text-slate-500 dark:bg-slate-800'
-                        "
-                        :title="`Оценка на старте: ${s.completedInitialPoints} SP`"
+                        class="w-14 shrink-0 text-right text-xs text-slate-400"
+                        title="Закрыто задач за спринт"
                       >
-                        {{ reestimate(s) > 0 ? '+' : '' }}{{ reestimate(s) }}
-                      </span>
-
-                      <span class="w-14 shrink-0 text-right text-xs text-slate-400">
                         {{ s.completedIssues.length }} зад.
                       </span>
                     </button>
@@ -1284,7 +1254,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                             ? { background: sliceColor(cs.slice) }
                             : {}
                         "
-                        :title="`Показать только задачи «${SLICE_LABEL[cs.slice]}»`"
+                        :title="`${fmtNum(cs.points)} SP из ${fmtNum(s.completedPoints)}. Нажмите, чтобы показать только эти задачи`"
                         @click="onSliceClick(s.sprintId, cs.slice)"
                       >
                         <span
@@ -1292,15 +1262,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           :style="{ background: sliceColor(cs.slice) }"
                         />
                         {{ SLICE_LABEL[cs.slice] }} {{ cs.pct }}%
-                        <span
-                          :class="
-                            sliceFilter.get(s.sprintId) === cs.slice
-                              ? 'text-white/80'
-                              : 'text-slate-400'
-                          "
-                        >
-                          ({{ fmtNum(cs.points) }})
-                        </span>
                       </button>
                       <button
                         v-if="sliceFilter.get(s.sprintId)"
@@ -1314,13 +1275,15 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         class="ml-auto cursor-help whitespace-nowrap text-[11px] tabular-nums text-slate-500 dark:text-slate-400"
                         :title="completionHint(completionRates([s]))"
                       >
-                        взяли {{ fmtNum(sprintCompletion(s).startPoints) }} → стало
-                        {{ fmtNum(sprintCompletion(s).finalPoints) }} → закрыли
-                        {{ fmtNum(sprintCompletion(s).completedPoints) }}
-                        <b class="text-slate-700 dark:text-slate-200">
-                          ({{ fmtRate(completionRates([s]).ofStart) }} /
-                          {{ fmtRate(completionRates([s]).ofFinal) }})
-                        </b>
+                        закрыли
+                        <b class="text-slate-700 dark:text-slate-200">{{
+                          fmtRate(completionRates([s]).ofStart)
+                        }}</b>
+                        из {{ fmtNum(completionRates([s]).startPoints) }} взятых ·
+                        <b class="text-slate-700 dark:text-slate-200">{{
+                          fmtRate(completionRates([s]).ofFinal)
+                        }}</b>
+                        из {{ fmtNum(completionRates([s]).finalPoints) }} к концу
                       </span>
                     </div>
 
@@ -1349,7 +1312,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         {{ activeEvidence(s.sprintId)!.issues.length }} зад. ·
                         {{ fmtNum(activeEvidence(s.sprintId)!.points) }} SP
                         <template v-if="activeEvidence(s.sprintId)!.result.value !== null">
-                          · {{ evidenceLimits(activeEvidence(s.sprintId)!.result) }}
+                          · {{ evidencePct(activeEvidence(s.sprintId)!.result) }}
                         </template>
                       </span>
                       <button
@@ -1383,7 +1346,7 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           </span>
                         </div>
                         <div class="mt-0.5 text-xs leading-snug text-slate-600 dark:text-slate-300">
-                          {{ e.issue?.summary || '—' }}
+                          {{ e.issue?.summary || '-' }}
                         </div>
                         <div
                           v-if="e.issue"
@@ -1414,8 +1377,8 @@ const CAP_SLICES_ALL = CAP_SLICES;
                       v-if="sliceFilter.get(s.sprintId)"
                       class="px-4 py-2 text-[11px] text-slate-500 dark:text-slate-400"
                     >
-                      Фильтр: {{ SLICE_LABEL[sliceFilter.get(s.sprintId)!] }} —
-                      {{ visibleIssues(s).length }} из {{ s.completedIssues.length }} задач
+                      {{ SLICE_LABEL[sliceFilter.get(s.sprintId)!] }}:
+                      {{ visibleIssues(s).length }} из {{ s.completedIssues.length }} закрытых задач
                     </div>
 
                     <table class="w-full text-sm">
@@ -1425,7 +1388,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         >
                           <th class="py-2 pl-11 pr-2 font-normal">Задача</th>
                           <th class="px-2 py-2 font-normal">Тип</th>
-                          <th class="px-2 py-2 font-normal">Статус</th>
                           <th class="px-2 py-2 text-right font-normal">SP</th>
                         </tr>
                       </thead>
@@ -1461,14 +1423,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                           <td class="px-2 py-2 text-xs text-slate-500 dark:text-slate-400">
                             {{ issue.type }}
                           </td>
-                          <td class="px-2 py-2">
-                            <span
-                              class="rounded px-1.5 py-0.5 text-[11px] font-medium"
-                              :class="statusTone(issue.status)"
-                            >
-                              {{ issue.status }}
-                            </span>
-                          </td>
                           <td
                             class="px-2 py-2 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300"
                           >
@@ -1477,14 +1431,6 @@ const CAP_SLICES_ALL = CAP_SLICES;
                         </tr>
                       </tbody>
                     </table>
-
-                    <!-- Carryover -->
-                    <div
-                      v-if="s.notCompletedIssues.length"
-                      class="border-t border-slate-100 px-4 py-2 text-xs text-slate-400 dark:border-slate-800"
-                    >
-                      Перенесено в следующий спринт: {{ s.notCompletedIssues.length }} задач
-                    </div>
                   </div>
                 </div>
               </div>

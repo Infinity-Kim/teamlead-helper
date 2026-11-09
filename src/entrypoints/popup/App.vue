@@ -1,30 +1,28 @@
 <script lang="ts" setup>
-import { ref } from 'vue';
+import { ref, onMounted } from 'vue';
 import { browser } from 'wxt/browser';
+import { jiraCreds, teams } from '@/shared/storage';
+import type { TeamBoard } from '@/core/domain';
 
-const opening = ref(false);
+const boards = ref<TeamBoard[]>([]);
+const jiraBase = ref('https://tvbet.atlassian.net');
+onMounted(async () => {
+  boards.value = (await teams.getValue()).filter((t) => t.enabled);
+  const creds = await jiraCreds.getValue();
+  if (creds?.baseUrl) jiraBase.value = creds.baseUrl;
+});
 
-/** Открыть side panel в текущем окне. */
-async function openSidePanel() {
-  opening.value = true;
-  try {
-    const win = await browser.windows.getCurrent();
-    if (win.id != null) {
-      await browser.sidePanel.open({ windowId: win.id });
-      window.close();
-    }
-  } finally {
-    opening.value = false;
-  }
+function open(url: string) {
+  void browser.tabs.create({ url });
+  window.close();
 }
-
+function boardUrl(t: TeamBoard) {
+  return t.projectKey
+    ? `${jiraBase.value}/jira/software/c/projects/${t.projectKey}/boards/${t.rapidViewId}/backlog`
+    : `${jiraBase.value}/secure/RapidBoard.jspa?rapidView=${t.rapidViewId}&view=planning`;
+}
 function openOptions() {
-  browser.runtime.openOptionsPage();
-}
-
-/** Открыть страницу отчёта по спринтам в новой вкладке. */
-function openSprintReport() {
-  browser.tabs.create({ url: browser.runtime.getURL('/sprint-report.html') });
+  void browser.runtime.openOptionsPage();
   window.close();
 }
 </script>
@@ -41,31 +39,37 @@ function openSprintReport() {
     </header>
 
     <p class="mb-4 text-sm text-slate-500 dark:text-slate-400">
-      Помощник тимлида. Подсчёты и аналитика по Jira.
+      Сколько взять в спринт, куда ушли SP и как идёт квартал - на доске Jira и в отчёте.
     </p>
 
     <div class="flex flex-col gap-2">
       <button
         type="button"
-        :disabled="opening"
-        class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500 disabled:opacity-50"
-        @click="openSidePanel"
+        class="rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-indigo-500"
+        @click="open(browser.runtime.getURL('/sprint-report.html'))"
       >
-        Открыть панель
+        Открыть отчёт
       </button>
+      <div v-if="boards.length" class="mt-1">
+        <span class="mb-1 block text-xs text-slate-500 dark:text-slate-400">Доски в Jira</span>
+        <div class="flex flex-wrap gap-2">
+          <button
+            v-for="t in boards"
+            :key="t.rapidViewId"
+            type="button"
+            class="rounded-md border border-slate-300 px-3 py-1.5 text-sm font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+            @click="open(boardUrl(t))"
+          >
+            {{ t.name }}
+          </button>
+        </div>
+      </div>
       <button
         type="button"
-        class="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
-        @click="openSprintReport"
-      >
-        Отчёт по спринтам
-      </button>
-      <button
-        type="button"
-        class="rounded-md border border-slate-300 px-3 py-2 text-sm font-medium transition hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+        class="rounded-md px-3 py-2 text-sm font-medium text-slate-500 transition hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
         @click="openOptions"
       >
-        Настройки
+        Открыть настройки
       </button>
     </div>
   </main>

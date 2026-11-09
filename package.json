@@ -1,10 +1,10 @@
 {
   "name": "teamlead-helper",
   "displayName": "Team Lead Helper",
-  "description": "Помощник тимлида: подсчёты и аналитика по Jira прямо в браузере.",
+  "description": "Считает по Jira, сколько SP брать в спринт, куда ушли SP и как идёт квартал.",
   "private": true,
   "license": "MIT",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
   "engines": {
     "node": ">=20"

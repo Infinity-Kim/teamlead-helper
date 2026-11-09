@@ -10,9 +10,9 @@ import {
   sprintHealthColors,
   teams,
   divisions,
-  type QuarterUiMode,
 } from '@/shared/storage';
 import {
+  DEFAULT_QUARTER_TARGET,
   DEFAULT_TEAMS,
   newDivisionId,
   parseBoardRef,
@@ -24,18 +24,12 @@ import {
   DEFAULT_HEALTH_COLORS,
   DEFAULT_HEALTH_SETTINGS,
   normalizeHealthSettings,
-  withHealthColorDefaults,
   withHealthDefaults,
-  type HealthColors,
   type HealthSettings,
 } from '@/core/metrics';
-import { levelStyle } from '@/components/health-tone';
 
 const targets = ref<CapTargets>({ Product: 67, Tech: 16.5, Support: 16.5 });
-const qProduct = ref(67);
-const qBand = ref(5);
-const qMode = ref<QuarterUiMode>('topBoard');
-// Статусы для времени работы крупных задач (в UI — строкой через запятую; в хранилище — массивы).
+// Статусы для времени работы крупных задач (в UI - строкой через запятую; в хранилище - массивы).
 const workStatuses = ref('');
 const doneStatuses = ref('');
 // Jira API для страницы отчёта по спринтам (Basic auth: email + токен).
@@ -54,20 +48,20 @@ const teamError = ref<string | null>(null);
 const newDivisionName = ref('');
 
 /**
- * Добавить команду по ссылке на доску (или номеру). Имя по умолчанию — ключ проекта из ссылки.
- * Команда сразу попадает в выбранный дивизион — иначе её пришлось бы искать в «Другие команды».
+ * Добавить команду по ссылке на доску (или номеру). Имя по умолчанию - ключ проекта из ссылки.
+ * Команда сразу попадает в выбранный дивизион - иначе её пришлось бы искать в «Другие команды».
  */
 function addTeam() {
   teamError.value = null;
   const board = parseBoardRef(newBoard.value);
   if (!board) {
     teamError.value =
-      'Не нашёл номер доски. Вставьте ссылку вида …/projects/CORE/boards/20 или просто номер доски.';
+      'В ссылке нет номера доски. Вставьте адрес доски из Jira или её номер, например 20.';
     return;
   }
   const existing = teamList.value.find((t) => t.rapidViewId === board.rapidViewId);
   if (existing) {
-    teamError.value = `Доска ${board.rapidViewId} уже добавлена как «${existing.name}».`;
+    teamError.value = `Доска ${board.rapidViewId} уже есть в списке под именем «${existing.name}».`;
     return;
   }
   const name = newTeamName.value.trim() || board.projectKey || `Доска ${board.rapidViewId}`;
@@ -121,7 +115,7 @@ function removeDivision(id: string) {
   if (newTeamDivision.value === id) newTeamDivision.value = divisionList.value[0]?.id ?? '';
 }
 
-/** Без имени команду/дивизион в отчёте не узнать — такие не сохраняем. */
+/** Без имени команду/дивизион в отчёте не узнать - такие не сохраняем. */
 const namesValid = computed(
   () =>
     teamList.value.every((t) => t.name.trim()) && divisionList.value.every((d) => d.name.trim()),
@@ -134,28 +128,15 @@ const canSave = computed(() => sumValid.value && namesValid.value);
  */
 const health = ref<HealthSettings>({ ...DEFAULT_HEALTH_SETTINGS });
 
-/** Цвета уровней здоровья (зелёный / жёлтый / красный). */
-const healthColors = ref<HealthColors>({ ...DEFAULT_HEALTH_COLORS });
-const COLOR_FIELDS: Array<{ key: keyof HealthColors; label: string }> = [
-  { key: 'ok', label: 'В норме' },
-  { key: 'warn', label: 'Первый порог' },
-  { key: 'crit', label: 'Второй порог' },
-];
-const colorsAreDefault = computed(() =>
-  COLOR_FIELDS.every(
-    (f) => healthColors.value[f.key].toLowerCase() === DEFAULT_HEALTH_COLORS[f.key].toLowerCase(),
-  ),
-);
-function resetHealthColors() {
-  healthColors.value = { ...DEFAULT_HEALTH_COLORS };
-}
+/** Цвета точек у заголовков порогов - те же, что у меток в отчёте. */
+const LEVEL_COLORS = DEFAULT_HEALTH_COLORS;
 
 /** Ключи порогов с числовым значением (для v-model по ключу). */
 type HealthKey = keyof HealthSettings;
 
 /**
- * Правила с двумя порогами: первый красит чип в жёлтый, второй — в красный.
- * Второй ниже первого не сохранится — поднимется до первого (иначе жёлтой зоны нет).
+ * Правила с двумя порогами: первый красит чип в жёлтый, второй - в красный.
+ * Второй ниже первого не сохранится - поднимется до первого (иначе жёлтой зоны нет).
  */
 const HEALTH_FIELDS: Array<{
   warnKey: HealthKey;
@@ -168,44 +149,44 @@ const HEALTH_FIELDS: Array<{
     warnKey: 'velocityDropPct',
     critKey: 'velocityDropCritPct',
     label: 'Просадка скорости',
-    hint: 'Насколько спринт может быть ниже медианы предыдущих',
+    hint: 'Ниже медианы 6 прошлых спринтов: медиана 100 SP, закрыли 80 - 20%.',
     unit: '%',
   },
   {
     warnKey: 'carryoverPct',
     critKey: 'carryoverCritPct',
     label: 'Перенос по SP',
-    hint: 'Доля незавершённого от взятого объёма (completed + перенос)',
+    hint: 'Не закрыли 20 SP из 100 - 20%. Жёлтый порог задаёт и план: при 20% план на 80% закрытия.',
     unit: '%',
   },
   {
     warnKey: 'reestimatePct',
     critKey: 'reestimateCritPct',
     label: 'Переоценка взятых задач',
-    hint: 'Рост оценок задач, которые уже были в спринте на старте',
+    hint: 'Оценки задач со старта выросли: взяли 100 SP, задача 5 стала 8 - 3%.',
     unit: '%',
   },
   {
     warnKey: 'scopeAddedPct',
     critKey: 'scopeAddedCritPct',
     label: 'Добавлено после старта',
-    hint: 'Объём задач, влетевших в спринт по ходу, от объёма на старте',
+    hint: 'Взяли 100 SP, после старта добавили 15 - 15%.',
     unit: '%',
   },
   {
     warnKey: 'puntedPct',
     critKey: 'puntedCritPct',
     label: 'Выброшено из спринта',
-    hint: 'Объём задач, убранных из спринта после старта, от объёма на старте. Ровно второй порог - уже красный',
+    hint: 'Взяли 100 SP, после старта убрали 10 - 10%. На красном пороге уже красный.',
     unit: '%',
   },
 ];
 
-/** Второй порог ниже первого — подсвечиваем сразу, не дожидаясь сохранения. */
+/** Второй порог ниже первого - подсвечиваем сразу, не дожидаясь сохранения. */
 const critBelowWarn = (f: (typeof HEALTH_FIELDS)[number]) =>
   health.value[f.critKey] < health.value[f.warnKey];
 
-/** Строка «A, B, C» → массив без пустых/пробелов. */
+/** Строка «A, B, C» в массив без пустых/пробелов. */
 function parseStatuses(s: string): string[] {
   return s
     .split(',')
@@ -218,18 +199,8 @@ const sum = computed(
 );
 const sumValid = computed(() => Math.abs(sum.value - 100) < 0.05);
 
-const QUARTER_MODES: { value: QuarterUiMode; label: string }[] = [
-  { value: 'topBoard', label: 'Блок вверху доски' },
-  { value: 'perSprint', label: 'Над активным спринтом' },
-  { value: 'off', label: 'Выключено' },
-];
-
 onMounted(async () => {
   targets.value = await capTargets.getValue();
-  const qt = await quarterTarget.getValue();
-  qProduct.value = qt.productPct;
-  qBand.value = qt.bandPp;
-  qMode.value = await quarterUiMode.getValue();
   const sc = await statusConfig.getValue();
   workStatuses.value = sc.workStatuses.join(', ');
   doneStatuses.value = sc.doneStatuses.join(', ');
@@ -239,9 +210,8 @@ onMounted(async () => {
     jiraEmail.value = creds.email;
     jiraToken.value = creds.apiToken;
   }
-  // Настройки до v0.6 не содержат вторых порогов — дополняем дефолтами.
+  // Настройки до v0.6 не содержат вторых порогов - дополняем дефолтами.
   health.value = withHealthDefaults(await sprintHealthThresholds.getValue());
-  healthColors.value = withHealthColorDefaults(await sprintHealthColors.getValue());
   teamList.value = await teams.getValue();
   divisionList.value = await divisions.getValue();
   newTeamDivision.value = divisionList.value[0]?.id ?? '';
@@ -259,16 +229,26 @@ async function save() {
     })),
   );
   await capTargets.setValue(targets.value);
-  await quarterTarget.setValue({ productPct: qProduct.value, bandPp: qBand.value });
-  await quarterUiMode.setValue(qMode.value);
+  // Убранные из интерфейса настройки (решение 09.11.2026): цель Product за квартал = цель
+  // Product спринта, допуск 5 пп как у полосы спринта, блок квартала всегда вверху доски.
+  await quarterTarget.setValue({
+    productPct: targets.value.Product,
+    bandPp: DEFAULT_QUARTER_TARGET.bandPp,
+  });
+  await quarterUiMode.setValue('topBoard');
   await statusConfig.setValue({
     workStatuses: parseStatuses(workStatuses.value),
     doneStatuses: parseStatuses(doneStatuses.value),
   });
   // Пороги: без отрицательных, окно ≥ 2 спринтов, второй порог не ниже первого.
-  health.value = normalizeHealthSettings(health.value);
+  // Окно истории убрано из интерфейса: всегда 6 спринтов, как у плана на старт.
+  health.value = normalizeHealthSettings({
+    ...health.value,
+    velocityWindow: DEFAULT_HEALTH_SETTINGS.velocityWindow,
+  });
   await sprintHealthThresholds.setValue({ ...health.value });
-  await sprintHealthColors.setValue(withHealthColorDefaults(healthColors.value));
+  // Цвета уровней убраны из интерфейса: всегда цвета Jira.
+  await sprintHealthColors.setValue({ ...DEFAULT_HEALTH_COLORS });
   // Jira-креды: сохраняем только если заполнены email и токен.
   if (jiraEmail.value.trim() && jiraToken.value.trim()) {
     await jiraCreds.setValue({
@@ -284,7 +264,7 @@ async function save() {
 
 <template>
   <div class="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-    <div class="mx-auto max-w-xl px-6 py-10">
+    <div class="mx-auto max-w-2xl px-6 py-10">
       <header class="mb-8 flex items-center gap-3">
         <span
           class="grid size-9 place-items-center rounded-lg bg-indigo-600 text-base font-bold text-white"
@@ -304,8 +284,7 @@ async function save() {
         <div>
           <h2 class="text-sm font-semibold">Команды</h2>
           <p class="mt-1 text-xs text-slate-400">
-            Доски, которые попадают в «Отчёт по спринтам». Снимите галочку, чтобы исключить команду
-            из отчёта и сводок, не удаляя её.
+            Доски для отчёта по спринтам. Без галочки команда не попадает в отчёт и сводки.
           </p>
         </div>
 
@@ -381,7 +360,7 @@ async function save() {
                   class="cursor-pointer appearance-none rounded-md border border-slate-300 bg-white py-1.5 pl-3 pr-8 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
                 >
                   <option v-for="d in divisionList" :key="d.id" :value="d.id">{{ d.name }}</option>
-                  <option value="">— без дивизиона —</option>
+                  <option value="">Без дивизиона</option>
                 </select>
                 <svg
                   class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400"
@@ -407,16 +386,14 @@ async function save() {
           </div>
           <p v-if="teamError" class="mt-2 text-xs text-red-500">{{ teamError }}</p>
           <p v-else class="mt-2 text-xs text-slate-400">
-            Ссылка на доску из адресной строки Jira или просто номер доски. Если название не
-            указать, возьмём ключ проекта из ссылки.
+            Адрес доски из Jira или её номер, например 20.
           </p>
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="text-sm font-semibold">Дивизионы</h2>
           <p class="mt-1 text-xs text-slate-400">
-            Группы команд для общей квартальной сводки в отчёте («Весь дивизион»). Команда может
-            входить в несколько дивизионов.
+            Команды для общей сводки за квартал в отчёте. Команда может быть в нескольких.
           </p>
         </div>
 
@@ -446,7 +423,9 @@ async function save() {
               :key="t.rapidViewId"
               class="inline-flex items-center gap-1.5 text-sm"
               :class="t.enabled ? '' : 'text-slate-400'"
-              :title="t.enabled ? '' : 'Команда исключена из отчёта — в сводку не попадёт'"
+              :title="
+                t.enabled ? '' : 'Команда выключена в списке команд, поэтому в сводку не попадёт'
+              "
             >
               <input
                 type="checkbox"
@@ -484,8 +463,11 @@ async function save() {
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
-          <h2 class="text-sm font-semibold">Целевое распределение capacity (%)</h2>
-          <p class="mt-1 text-xs text-slate-400">Сумма должна равняться 100%.</p>
+          <h2 class="text-sm font-semibold">Цель по долям SP, %</h2>
+          <p class="mt-1 text-xs text-slate-400">
+            Доли SP по меткам задач Product, Tech и Support. Цель Product - и для спринта, и для
+            квартала. Отклонение больше 5 пунктов доска подсветит: цель 67%, факт 61%.
+          </p>
         </div>
 
         <div class="grid grid-cols-3 gap-3">
@@ -524,75 +506,13 @@ async function save() {
           </label>
         </div>
         <p class="text-xs" :class="sumValid ? 'text-slate-400' : 'text-red-500'">
-          Сумма: {{ sum }}%<span v-if="!sumValid"> — должно быть 100%</span>
+          Сумма {{ sum }}%<span v-if="!sumValid">, нужно 100%</span>
         </p>
-
-        <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
-          <h2 class="mb-2 text-sm font-semibold">Квартальный баланс</h2>
-          <div class="grid grid-cols-2 gap-3">
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium">Цель Product за квартал, %</span>
-              <input
-                v-model.number="qProduct"
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-                class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-              />
-            </label>
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium">Коридор ±, пп</span>
-              <input
-                v-model.number="qBand"
-                type="number"
-                min="0"
-                max="50"
-                step="1"
-                class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-              />
-            </label>
-          </div>
-          <span class="mt-1 block text-xs text-slate-400">
-            Остальное (Tech+Support) = {{ 100 - qProduct }}%. Алерт при выходе накопленного за
-            квартал за {{ qProduct - qBand }}–{{ qProduct + qBand }}%.
-          </span>
-
-          <label class="mt-3 block">
-            <span class="mb-1 block text-xs font-medium">Где показывать квартальный баланс</span>
-            <span class="relative block">
-              <select
-                v-model="qMode"
-                class="w-full cursor-pointer appearance-none rounded-md border border-slate-300 bg-white py-1.5 pl-3 pr-8 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-              >
-                <option v-for="m in QUARTER_MODES" :key="m.value" :value="m.value">
-                  {{ m.label }}
-                </option>
-              </select>
-              <svg
-                class="pointer-events-none absolute right-2.5 top-1/2 size-3.5 -translate-y-1/2 text-slate-400"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M4 6l4 4 4-4" />
-              </svg>
-            </span>
-            <span class="mt-1 block text-xs text-slate-400">
-              Переключай и смотри на доске/в панели, какой вариант удобнее.
-            </span>
-          </label>
-        </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
           <h2 class="mb-1 text-sm font-semibold">Статусы задач</h2>
           <p class="mb-3 text-xs text-slate-400">
-            По ним план считает время работы крупных задач (от 13 SP). Статусы через запятую,
-            регистр не важен.
+            По ним план считает дни работы над задачами от 3 SP. По умолчанию - статусы доски ELCAS.
           </p>
           <label class="block">
             <span class="mb-1 block text-xs font-medium">Статусы «в работе»</span>
@@ -603,8 +523,8 @@ async function save() {
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
             <span class="mt-1 block text-xs text-slate-400">
-              Первый вход в любой из этих статусов - начало работы. Очередь на разработку, например
-              «Ready for DEV», сюда не включать: время ожидания засчитается в работу.
+              Первый вход в статус - начало работы. «Ready for DEV» не включайте: ожидание станет
+              работой.
             </span>
           </label>
           <label class="mt-3 block">
@@ -615,18 +535,13 @@ async function save() {
               placeholder="Готово, Done, Closed"
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
-            <span class="mt-1 block text-xs text-slate-400">
-              Вход в любой из этих статусов - конец работы над задачей.
-            </span>
           </label>
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
-          <h2 class="mb-1 text-sm font-semibold">Здоровье спринта (пороги)</h2>
+          <h2 class="mb-1 text-sm font-semibold">Здоровье спринта: пороги</h2>
           <p class="mb-3 text-xs text-slate-400">
-            Правила на странице «Отчёт по спринтам»: за первым порогом чип спринта жёлтый, за вторым
-            — красный. Ровно на пороге - ещё норма, кроме «выброшено»: там второй порог уже красный.
-            Это ориентиры для планирования, а не оценка команды — меняйте под свои договорённости.
+            Метка спринта в отчёте жёлтая выше жёлтого порога и красная выше красного.
           </p>
           <div
             class="mb-1 grid grid-cols-[minmax(0,1fr)_5rem_5rem_2.5rem] items-end gap-x-2 text-[11px] text-slate-400"
@@ -635,14 +550,14 @@ async function save() {
             <span class="inline-flex items-center gap-1">
               <span
                 class="inline-block size-2 rounded-full"
-                :style="{ backgroundColor: healthColors.warn }"
+                :style="{ backgroundColor: LEVEL_COLORS.warn }"
               ></span
               >жёлтый
             </span>
             <span class="inline-flex items-center gap-1">
               <span
                 class="inline-block size-2 rounded-full"
-                :style="{ backgroundColor: healthColors.crit }"
+                :style="{ backgroundColor: LEVEL_COLORS.crit }"
               ></span
               >красный
             </span>
@@ -661,7 +576,7 @@ async function save() {
                   v-if="critBelowWarn(f)"
                   class="block text-xs text-rose-600 dark:text-rose-400"
                 >
-                  Красный порог ниже жёлтого — при сохранении станет равен жёлтому
+                  Красный ниже жёлтого - сохраним равным жёлтому
                 </span>
               </div>
               <input
@@ -688,67 +603,17 @@ async function save() {
               <span class="text-xs text-slate-400">{{ f.unit }}</span>
             </div>
           </div>
-          <label class="mt-4 block">
-            <span class="mb-1 block text-xs font-medium">Окно истории</span>
-            <div class="flex items-center gap-2">
-              <input
-                v-model.number="health.velocityWindow"
-                type="number"
-                min="2"
-                step="1"
-                class="w-20 rounded-md border border-slate-300 px-2 py-1.5 text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
-              />
-              <span class="text-xs text-slate-400">спр.</span>
-            </div>
-            <span class="mt-1 block text-xs text-slate-400">
-              Сколько предыдущих спринтов берётся за базу скорости
-            </span>
-          </label>
-
-          <div class="mt-4">
-            <span class="mb-1 block text-xs font-medium">Цвета уровней</span>
-            <div class="flex flex-wrap items-center gap-4">
-              <label v-for="c in COLOR_FIELDS" :key="c.key" class="flex items-center gap-2">
-                <input
-                  v-model="healthColors[c.key]"
-                  type="color"
-                  :aria-label="`Цвет: ${c.label}`"
-                  class="h-7 w-9 cursor-pointer rounded border border-slate-300 bg-transparent p-0.5 dark:border-slate-700"
-                />
-                <span
-                  class="rounded border px-1.5 py-0.5 text-[10px] font-medium text-slate-800 dark:text-slate-100"
-                  :style="levelStyle(healthColors[c.key])"
-                >
-                  {{ c.label }}
-                </span>
-              </label>
-              <button
-                v-if="!colorsAreDefault"
-                type="button"
-                class="text-xs text-indigo-600 hover:underline dark:text-indigo-400"
-                @click="resetHealthColors"
-              >
-                Сбросить к цветам Jira
-              </button>
-            </div>
-            <span class="mt-1 block text-xs text-slate-400">
-              По умолчанию — палитра Atlassian (Jira): lime, yellow, red. Справа — как будет
-              выглядеть чип в отчёте.
-            </span>
-          </div>
         </div>
 
         <div class="border-t border-slate-200 pt-4 dark:border-slate-800">
-          <h2 class="mb-1 text-sm font-semibold">Доступ к Jira (отчёт по спринтам)</h2>
+          <h2 class="mb-1 text-sm font-semibold">API-токен Jira, необязательно</h2>
           <p class="mb-3 text-xs text-slate-400">
-            Нужен для отдельной страницы «Отчёт по спринтам» (по кнопке в popup). Используется
-            Basic-авторизация: рабочий email + персональный API-токен Atlassian. Токен создаётся в
-            <span class="font-mono">id.atlassian.com → Security → API tokens</span> и хранится
-            только локально в браузере (не синхронизируется, не отправляется никуда, кроме самой
-            Jira).
+            Без токена отчёт берёт данные из открытой вкладки Jira, с токеном - без неё. Токен
+            создаётся в <span class="font-mono">id.atlassian.com, Security, API tokens</span> и
+            хранится только в этом браузере.
           </p>
           <label class="block">
-            <span class="mb-1 block text-xs font-medium">Base URL</span>
+            <span class="mb-1 block text-xs font-medium">Адрес Jira</span>
             <input
               v-model="jiraBaseUrl"
               type="url"
@@ -776,16 +641,10 @@ async function save() {
               class="w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-sm outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-800"
             />
             <span class="mt-1 block text-xs text-slate-400">
-              Сохраняется, только если заполнены и email, и токен. Токен можно отозвать в любой
-              момент в настройках Atlassian.
+              Сохраним, если заполнены и email, и токен.
             </span>
           </label>
         </div>
-
-        <p class="border-t border-slate-200 pt-4 text-xs text-slate-400 dark:border-slate-800">
-          Виджет работает на любой доске автоматически — настройки применяются ко всем. Статусы по
-          умолчанию настроены под доску ELCAS; для другой доски укажите её названия статусов.
-        </p>
 
         <div class="flex items-center gap-3 pt-1">
           <button
@@ -795,7 +654,7 @@ async function save() {
           >
             Сохранить
           </button>
-          <span v-if="saved" class="text-sm text-green-600">Сохранено ✓</span>
+          <span v-if="saved" class="text-sm text-green-600">Сохранено</span>
           <span v-else-if="!namesValid" class="text-sm text-red-500">
             У каждой команды и дивизиона должно быть имя
           </span>

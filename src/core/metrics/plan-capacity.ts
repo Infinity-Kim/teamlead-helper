@@ -1,5 +1,6 @@
 import type { SprintReportDetail } from '@/core/domain';
 import { median } from './median';
+import { sprintCompletion } from './sprint-completion';
 import { firstWorkStart, type StatusTransition } from './status-transitions';
 
 /**
@@ -42,7 +43,7 @@ import { firstWorkStart, type StatusTransition } from './status-transitions';
  *
  * ШАГ 4. План — 20%-квантиль симуляции (в цель ≈ 4 спринта из 5), «вызов» — 30% (≈ 7 из 10).
  *
- * КРУПНЫЕ ЗАДАЧИ (≥ BIG_TASK_SP = 13 SP) делаются два спринта, а Jira засчитывает их целиком
+ * КРУПНЫЕ ЗАДАЧИ (≥ BIG_TASK_SP = 3 SP) часто идут дольше спринта, а Jira засчитывает их целиком
  * в спринте закрытия. В истории это пила (спринт старта — «провал», закрытия — «рекорд»), поэтому
  * sprintFlows раздаёт SP такой задачи спринтам по ВРЕМЕНИ РАБОТЫ над ней — от первого входа
  * в рабочий статус до закрытия, включая работу до того, как задача попала в отчёт спринта.
@@ -78,6 +79,11 @@ export interface SprintFlow {
    * разнесены поровну по этим спринтам. Нет — совпадает с `completed`.
    */
   work?: number;
+  /**
+   * Взяли на старте, SP (как «взяли» на странице спринтов, см. sprintCompletion). Только для
+   * показа в разборе плана, в расчёт плана не входит. Нет - данных о старте нет.
+   */
+  start?: number;
 }
 
 /** Окно прогноза: столько последних закрытых спринтов видит модель. */
@@ -91,10 +97,14 @@ const TAU = 0.2;
 /** Квантиль «вызова»: ≈ в 70% спринтов. */
 const STRETCH_TAU = 0.3;
 /**
- * Задача от стольких SP делается два спринта (договорённость команд: 13 SP за спринт не
- * закрывают). В первом спринте она — перенос, во втором Jira засчитывает её целиком.
+ * Задача от стольких SP разносится по спринтам по времени работы: в спринте старта она перенос,
+ * в спринте закрытия Jira засчитывает её целиком. Было 13 SP. Бэктест 2026-11-09 (ELCAS / POC /
+ * Web, 160 спринтов, changelog всех задач от 3 SP): порог 3 снижает pinball@0.2 на 0.46 SP за
+ * спринт, ДИ95 от -0.85 до -0.09; порог 5 - на 0.29, ДИ95 включает 0; порог 8 не отличается от 13.
+ * Changelog закрытых задач кэшируется навсегда (shared/storage/changelog-cache), поэтому из Jira
+ * при следующих открытиях идут только задачи новых и незакрытых.
  */
-export const BIG_TASK_SP = 13;
+export const BIG_TASK_SP = 3;
 /** Порог |Z| Манна–Кендалла (≈ p < 0.1, двусторонний). */
 const TREND_Z = 1.64;
 /** Меньше точек — тренд не проверяем. */
@@ -146,7 +156,12 @@ export function sprintFlow(s: SprintReportDetail): SprintFlow {
     seen.add(i.key);
     added += pts(i.points);
   }
-  return { name: s.name, completed: pts(s.completedPoints), added: round1(added) };
+  return {
+    name: s.name,
+    completed: pts(s.completedPoints),
+    added: round1(added),
+    start: sprintCompletion(s).startPoints,
+  };
 }
 
 /** Сделано по работе (см. SprintFlow.work). */
@@ -431,17 +446,17 @@ export function planCapacity(
 export function describePlan(p: PlanCapacity): string {
   const target = Math.round(p.targetCompletion * 100);
   const trend = p.trend?.active
-    ? `\nКоманда ${p.trend.slope > 0 ? 'растёт' : 'снижается'}: ≈ ${p.trend.slope > 0 ? '+' : ''}${p.trend.slope} SP за спринт — план догонит за несколько спринтов.`
+    ? `\nЗа ${p.count} спринтов это число ${p.trend.slope > 0 ? 'растёт' : 'падает'} на ${Math.abs(p.trend.slope)} SP за спринт. В план это не добавлено: план дойдёт до нового уровня за ${p.count} спринтов.`
     : '';
   return (
-    `План на старт ≤ ${p.recommended} SP — столько брать, чтобы закрыть ≥ ${target}% взятого ` +
-    `с учётом прилётов; в цель ≈ 4 спринта из 5.\n` +
-    `Почему столько: закрываете обычно ≈ ${p.medianCompleted} SP, но по ходу спринта прилетает ` +
-    `≈ ${p.medianAdded} SP — под них оставлено место. Такой план уложился бы в ` +
+    `Берите в следующий спринт до ${p.recommended} SP. Тогда команда закроет не меньше ${target}% ` +
+    `взятого в 4 спринтах из 5, даже с задачами, которые добавят по ходу спринта.\n` +
+    `Почему не больше: обычно закрываете ${p.medianCompleted} SP, но по ходу спринта добавляют ещё ` +
+    `${p.medianAdded} SP, и под них оставлено место. С таким планом уложились бы в ` +
     `${p.windowFits} из ${p.count} последних спринтов.\n` +
-    `Как: по последним ${p.count} спринтам допустимый план = закрыто ÷ ${p.targetCompletion} − ` +
-    `прилёты; симулируем следующий спринт (Монте-Карло) и берём нижние 20%.${trend}\n` +
-    `Можно больше: ${p.stretch} SP — в цель ≈ 7 из 10.`
+    `Как посчитано: по ${p.count} последним спринтам, сколько в каждом можно было взять на старте, ` +
+    `и по множеству похожих исходов следующего спринта. План - граница 20% худших исходов.${trend}\n` +
+    `С риском: до ${p.stretch} SP, тогда уложитесь в 7 спринтах из 10.`
   );
 }
 
@@ -474,7 +489,75 @@ export interface PlanBacktest {
   /** То же для «медианы закрытого за 6 спринтов» — прежней velocity. */
   hitsMedian: number;
   /** По спринтам: имя, рекомендация, медиана velocity, допустимый план. */
-  rows: Array<{ name: string; plan: number; median: number; allowed: number }>;
+  rows: PlanBacktestRow[];
+  /** Итог проверки для одной фразы над таблицей: занижает модель план или завышает. */
+  summary: PlanBacktestSummary;
+}
+
+/** Один проверенный спринт. */
+export interface PlanBacktestRow {
+  name: string;
+  /** План, который модель дала бы на старте этого спринта (по PLAN_WINDOW спринтам до него). */
+  plan: number;
+  /** Медиана закрытого за PLAN_WINDOW спринтов до него — прежняя velocity. */
+  median: number;
+  /** Сколько на самом деле можно было взять на старте (допустимый план этого спринта). */
+  allowed: number;
+  /** Сколько команда на самом деле закрыла в этом спринте, SP (green bar Jira). */
+  completed: number;
+  /** Сколько SP добавили по ходу этого спринта. */
+  added: number;
+  /** Сколько взяли на старте, SP. null - данных о старте нет. Только для графика проверки. */
+  start: number | null;
+  /** allowed − plan: > 0 — план был ниже возможного (запас), < 0 — выше (не хватило). */
+  gap: number;
+}
+
+/**
+ * Итог проверки: только для отображения, план не меняет. Модель по построению берёт план ниже
+ * «в среднем» (квантиль τ), поэтому судим не по среднему запасу, а по частоте попаданий против
+ * цели (1 − τ) с допуском на случайность 1.5·√(n·τ·(1 − τ)) (1.5 стандартного отклонения
+ * биномиального: на 12 спринтах 8-11 попаданий при цели 10 - ещё случайность).
+ */
+export interface PlanBacktestSummary {
+  scored: number;
+  /** В скольких спринтах план выполнили бы (plan ≤ allowed). */
+  hits: number;
+  /** Сколько попаданий нужно по цели: round((1 − τ) · scored). */
+  targetHits: number;
+  /** Средний запас allowed − plan, SP, до 0.1. Положителен по построению - это запас модели. */
+  meanGap: number;
+  /**
+   * На сколько SP сдвинуть все планы, чтобы попаданий стало ровно targetHits: > 0 - план можно
+   * было поднять, < 0 - нужно было снизить. До 0.1.
+   */
+  shift: number;
+  /** under - выполняли заметно чаще цели (план занижен), over - реже (завышен), ok - в допуске. */
+  verdict: 'under' | 'over' | 'ok';
+}
+
+/** Итог проверки на прошлых спринтах. Пустой список - scored 0, verdict ok. */
+export function summarizeBacktest(
+  rows: readonly Pick<PlanBacktestRow, 'plan' | 'allowed'>[],
+  tau: number = TAU,
+): PlanBacktestSummary {
+  const n = rows.length;
+  if (!n) return { scored: 0, hits: 0, targetHits: 0, meanGap: 0, shift: 0, verdict: 'ok' };
+  const gaps = rows.map((r) => r.allowed - r.plan).sort((a, b) => a - b);
+  const hits = gaps.filter((g) => g >= 0).length;
+  const expected = (1 - tau) * n;
+  const targetHits = Math.round(expected);
+  const tol = 1.5 * Math.sqrt(n * tau * (1 - tau));
+  const verdict = hits > expected + tol ? 'under' : hits < expected - tol ? 'over' : 'ok';
+  return {
+    scored: n,
+    hits,
+    targetHits,
+    meanGap: round1(gaps.reduce((s, g) => s + g, 0) / n),
+    // Сдвиг δ, при котором ровно targetHits спринтов с gap ≥ δ: (n − targetHits)-й снизу запас.
+    shift: round1(gaps[Math.min(n - 1, n - targetHits)]),
+    verdict,
+  };
 }
 
 export interface PlanExplanation {
@@ -519,14 +602,19 @@ export function explainPlan(
   const allowed = history.map((f) => allowedPlan(f, targetCompletion));
   const names = history.map((f, i) => f.name ?? `#${i + 1}`);
 
-  const rows: PlanBacktest['rows'] = [];
+  const rows: PlanBacktestRow[] = [];
   for (let t = Math.max(PLAN_WINDOW, history.length - PLAN_BACKTEST); t < history.length; t++) {
     const before = history.slice(t - PLAN_WINDOW, t);
+    const planT = simulate(before, targetCompletion).plan(TAU);
     rows.push({
       name: names[t],
-      plan: simulate(before, targetCompletion).plan(TAU),
+      plan: planT,
       median: round1(median(before.map((f) => f.completed))!),
       allowed: round1(allowed[t]),
+      completed: history[t].completed,
+      added: history[t].added,
+      start: history[t].start ?? null,
+      gap: round1(allowed[t] - planT),
     });
   }
 
@@ -564,6 +652,7 @@ export function explainPlan(
       hitsPlan: rows.filter((r) => r.plan <= r.allowed).length,
       hitsMedian: rows.filter((r) => r.median <= r.allowed).length,
       rows,
+      summary: summarizeBacktest(rows),
     },
     constants: {
       tau: TAU,

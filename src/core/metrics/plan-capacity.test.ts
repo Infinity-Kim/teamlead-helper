@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { SprintReportDetail, SprintReportIssue } from '@/core/domain';
 import {
   allowedPlan,
+  BIG_TASK_SP,
   bigTaskWorkOf,
   describePlan,
   explainPlan,
@@ -14,6 +15,7 @@ import {
   silvermanBandwidth,
   sprintFlow,
   sprintFlows,
+  summarizeBacktest,
   targetCompletionFromCarryover,
   theilSen,
 } from './plan-capacity';
@@ -201,7 +203,7 @@ describe('planCapacity', () => {
       .slice(-PLAN_WINDOW)
       .filter((f) => allowedPlan(f, 0.8) >= r.recommended).length;
     expect(r.windowFits).toBe(fits);
-    expect(describePlan(r)).toContain(`уложился бы в ${fits} из 6`);
+    expect(describePlan(r)).toContain(`уложились бы в ${fits} из 6`);
   });
 
   it('вызов не ниже рекомендации', () => {
@@ -283,7 +285,7 @@ describe('sprintFlow', () => {
       puntedIssues: [issue('A-4', 20)],
       addedIssueKeys: new Set(['A-2', 'A-3', 'A-4']),
     });
-    expect(sprintFlow(s)).toEqual({ name: 'S', completed: 13, added: 11 });
+    expect(sprintFlow(s)).toEqual({ name: 'S', completed: 13, added: 11, start: 5 });
   });
 
   it('задача в двух массивах учитывается один раз, null-оценка → 0', () => {
@@ -296,7 +298,7 @@ describe('sprintFlow', () => {
   });
 });
 
-describe('sprintFlows — крупные задачи (≥ 13 SP) по времени работы', () => {
+describe('sprintFlows — крупные задачи (≥ 3 SP) по времени работы', () => {
   // Два спринта по 14 дней: 01–15.09 и 15–29.09.
   const s1 = (p: Partial<SprintReportDetail>) =>
     report({ isoStartDate: '2026-09-01T08:00:00Z', isoCompleteDate: '2026-09-15T08:00:00Z', ...p });
@@ -350,12 +352,27 @@ describe('sprintFlows — крупные задачи (≥ 13 SP) по врем�
     expect(flows[0].work).toBe(56.5);
   });
 
-  it('мелкие задачи не трогаем', () => {
+  it('задачи меньше 3 SP не трогаем', () => {
     const flows = sprintFlows([
-      s1({ completedPoints: 50, notCompletedIssues: [issue('S-1', 8)] }),
-      s2({ completedPoints: 58, completedIssues: [issue('S-1', 8)] }),
+      s1({ completedPoints: 50, notCompletedIssues: [issue('S-1', 2)] }),
+      s2({ completedPoints: 52, completedIssues: [issue('S-1', 2)] }),
     ]);
     expect(flows.every((f) => f.work === undefined)).toBe(true);
+  });
+
+  it('порог 3 SP: задача на 3 SP и на 8 SP тоже разносится по времени работы', () => {
+    expect(BIG_TASK_SP).toBe(3);
+    const flows = sprintFlows(
+      [
+        s1({ completedPoints: 50, notCompletedIssues: [issue('M-1', 3), issue('M-2', 8)] }),
+        s2({ completedPoints: 61, completedIssues: [issue('M-1', 3), issue('M-2', 8)] }),
+      ],
+      new Map([
+        ['M-1', { startedAt: '2026-09-08T08:00:00Z', doneAt: '2026-09-22T08:00:00Z' }],
+        ['M-2', { startedAt: '2026-09-08T08:00:00Z', doneAt: '2026-09-22T08:00:00Z' }],
+      ]),
+    );
+    expect(flows.map((f) => f.work)).toEqual([55.5, 55.5]);
   });
 
   it('bigTaskWorkOf: первый вход в рабочий статус → первое «готово» после него', () => {
@@ -414,5 +431,74 @@ describe('explainPlan — разбор плана для страницы «ка
     expect(area).toBeCloseTo(1, 1);
     expect(e.plan.recommended).toBeLessThan(e.medianSim);
     expect(explainPlan([], 0.8)).toBeNull();
+  });
+});
+
+describe('summarizeBacktest - итог проверки на прошлых спринтах', () => {
+  const row = (plan: number, allowed: number) => ({ plan, allowed });
+
+  it('попадания, цель, средний запас и сдвиг до цели', () => {
+    const s = summarizeBacktest([row(40, 50), row(40, 44), row(40, 36), row(40, 52), row(40, 48)]);
+    // запасы 10, 4, -4, 12, 8: выполнили 4 из 5 = цель, сдвигать не нужно сверх 4-го запаса
+    expect(s).toEqual({
+      scored: 5,
+      hits: 4,
+      targetHits: 4,
+      meanGap: 6,
+      shift: 4,
+      verdict: 'ok',
+    });
+  });
+
+  it('выполняли во всех 12 - план занижен, его можно было поднять', () => {
+    const rows = Array.from({ length: 12 }, (_, i) => row(40, 50 + i));
+    // запасы 10..21, чтобы выполнить в 10 из 12, план поднимаем на 3-й снизу запас: 12
+    expect(summarizeBacktest(rows)).toMatchObject({ hits: 12, shift: 12, verdict: 'under' });
+  });
+
+  it('выполняли в половине - план завышен, его нужно было снизить', () => {
+    const rows = Array.from({ length: 12 }, (_, i) => row(40, i < 6 ? 45 : 28 + i));
+    // запасы 5 x6 и -6..-1: 6 попаданий; чтобы стало 10, план снижаем на 3-й снизу запас -4
+    expect(summarizeBacktest(rows)).toMatchObject({ hits: 6, shift: -4, verdict: 'over' });
+  });
+
+  it('11 из 12 при цели 10 - в пределах случайности', () => {
+    const rows = Array.from({ length: 12 }, (_, i) => row(40, i ? 50 : 30));
+    expect(summarizeBacktest(rows)).toMatchObject({ hits: 11, targetHits: 10, verdict: 'ok' });
+  });
+
+  it('пусто - нечего проверять', () => {
+    expect(summarizeBacktest([])).toMatchObject({ scored: 0, hits: 0, shift: 0, verdict: 'ok' });
+  });
+
+  it('в explainPlan: строки знают закрытое и запас, итог совпадает с hitsPlan', () => {
+    const flows = flowsOf('ELCAS');
+    const e = explainPlan(flows, 0.8)!;
+    const last = e.backtest.rows.at(-1)!;
+    expect(last.completed).toBe(flows.at(-1)!.completed);
+    expect(last.added).toBe(flows.at(-1)!.added);
+    expect(last.gap).toBeCloseTo(last.allowed - last.plan, 0);
+    expect(e.backtest.summary).toMatchObject({
+      scored: 12,
+      hits: 9,
+      targetHits: 10,
+      verdict: 'ok',
+    });
+    expect(e.backtest.summary.hits).toBe(e.backtest.hitsPlan);
+  });
+
+  it('«взяли на старте» только для показа: план с ним и без него один и тот же', () => {
+    const flows = flowsOf('ELCAS');
+    const bare = explainPlan(flows, 0.8)!;
+    expect(bare.backtest.rows.every((r) => r.start === null)).toBe(true);
+    const withStart = explainPlan(
+      flows.map((f, i) => ({ ...f, start: 50 + i })),
+      0.8,
+    )!;
+    expect(withStart.backtest.rows.at(-1)!.start).toBe(50 + flows.length - 1);
+    expect(withStart.plan).toEqual(bare.plan);
+    expect(withStart.backtest.rows.map((r) => r.plan)).toEqual(
+      bare.backtest.rows.map((r) => r.plan),
+    );
   });
 });

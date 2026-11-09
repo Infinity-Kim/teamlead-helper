@@ -79,7 +79,9 @@ export async function sendMessage<T extends MessageType>(
   const res = (await browser.runtime.sendMessage(payload)) as AppResponseMap[T] | undefined;
   if (res === undefined || res === null) {
     // Пустой ответ = обработчик не отработал. Молчать нельзя: вызывающий деструктурирует ответ.
-    throw new Error(`Сообщение «${type}» осталось без ответа от background.`);
+    throw new Error(
+      `Расширение не ответило на запрос «${type}». Обновите страницу, а если не поможет, перезапустите расширение в chrome://extensions.`,
+    );
   }
   return res;
 }

@@ -13,6 +13,7 @@ import {
   DEFAULT_HEALTH_SETTINGS,
   type HealthColors,
   type HealthSettings,
+  type StatusTransition,
 } from '@/core/metrics';
 
 /**
@@ -114,6 +115,29 @@ export const sprintListCache = storage.defineItem<Record<string, SprintListCache
   'local:sprintListCache',
   { fallback: {} },
 );
+
+/**
+ * Постоянный кэш истории статусов ЗАКРЫТЫХ задач, по ключу задачи и БЕЗ TTL. Нужен плану:
+ * задачи от BIG_TASK_SP (3 SP) разносятся по времени работы, это 190-240 changelog-запросов
+ * на доску. Закрытая задача больше не меняется, поэтому из Jira качаются только новые закрытые
+ * и незакрытые. Храним только переходы статусов, а не сырой changelog: ~10 записей на задачу.
+ * Статусы «работа» и «готово» применяются при расчёте, поэтому их смена в options кэш не портит.
+ */
+export interface ChangelogCacheEntry {
+  transitions: StatusTransition[];
+  /** Когда положили - для вытеснения самых старых при переполнении. */
+  cachedAt: number;
+}
+export const changelogCache = storage.defineItem<Record<string, ChangelogCacheEntry>>(
+  'local:changelogCache',
+  { fallback: {} },
+);
+
+/**
+ * Максимум задач в кэше. 3 доски × ~230 задач в окне плана + ~15 новых за спринт на доску:
+ * 3000 хватает на 2 года, это ~1,5 МБ из ~10 МБ chrome.storage.local.
+ */
+export const CHANGELOG_CACHE_LIMIT = 3000;
 
 /** Свежесть списка спринтов. Спринты закрываются раз в 2 недели — 15 минут с запасом. */
 export const SPRINT_LIST_TTL_MS = 15 * 60 * 1000;
