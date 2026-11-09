@@ -16,27 +16,35 @@ const props = defineProps<{
 const T = ADS;
 
 const productPct = computed(() => props.balance.productPct);
+/** Число по-русски: до 1 знака после запятой, «74,8», «20». */
+const fmt = (n: number) => n.toLocaleString('ru-RU', { maximumFractionDigits: 1 });
 const otherPct = computed(() => +(100 - props.balance.productPct).toFixed(1));
-const deltaLabel = computed(() => {
-  const d = props.balance.deltaPp;
-  return `${d > 0 ? '+' : ''}${d}%`;
-});
 const debtAbs = computed(() => Math.abs(props.balance.productDebtSp));
-const skewDir = computed(() => (props.balance.deltaPp > 0 ? 'Product' : 'остального'));
 const statusColor = computed(() => (props.balance.outOfBand ? T.danger : T.success));
+const bandLabel = computed(
+  () => `${props.targetPct - props.bandPp}-${props.targetPct + props.bandPp}%`,
+);
 const sprintsLabel = computed(
   () =>
     `${props.balance.sprintsCounted} из ${props.balance.sprintsCounted + props.balance.sprintsLeft} спринтов`,
 );
 
-// План активного спринта показываем, когда в активном спринте есть незавершённый объём
-// («взято, но не Done») — тогда есть что прогнозировать. Расхождение по кварталу может быть
-// малым, но факт/план активного спринта всё равно различаются — это и есть суть разделения.
+// «С активным» показываем, когда в активном спринте ещё не закрыто от 1 SP: тогда доля
+// Product к концу спринта может отличаться от факта.
 const planExtraSp = computed(
   () => +(props.balance.plannedTotal - props.balance.totalPoints).toFixed(1),
 );
 const showPlan = computed(() => props.balance.hasActive && planExtraSp.value >= 1);
-const planColor = computed(() => (props.balance.plannedOutOfBand ? T.danger : T.success));
+const planColor = computed(() => (props.balance.plannedOutOfBand ? T.danger : T.subtle));
+/** «за 1 оставшийся спринт», «за 2 оставшихся спринта», «за 5 оставшихся спринтов». */
+function sprintsWord(n: number): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return 'оставшийся спринт';
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return 'оставшихся спринта';
+  return 'оставшихся спринтов';
+}
+const plannedPct = computed(() => Math.round(props.balance.plannedProductPct));
 
 // Сколько спринтов квартала ещё осталось (0 = квартал на последнем спринте).
 const remaining = computed(() => props.balance.sprintsLeft);
@@ -53,12 +61,12 @@ const remaining = computed(() => props.balance.sprintsLeft);
       boxSizing: 'border-box',
     }"
   >
-    <!-- Заголовок: квартал + прогресс + факт-статус + (план) -->
+    <!-- Заголовок: квартал, прогресс, доля Product и где окажется с активным спринтом -->
     <div
       :style="{
         display: 'flex',
         alignItems: 'center',
-        gap: '8px',
+        gap: '2px 8px',
         marginBottom: '4px',
         flexWrap: 'wrap',
       }"
@@ -66,35 +74,25 @@ const remaining = computed(() => props.balance.sprintsLeft);
       <span :style="{ fontWeight: 600, display: 'inline-flex', alignItems: 'center', gap: '4px' }">
         Квартал {{ balance.quarter }}
         <InfoTip
-          title="Баланс капасити за квартал"
-          what="Какую долю усилий команда за квартал тратит на Product против остального (Tech+Support). Копится по спринтам (quarter-to-date)."
-          how="Сумма выполненных Product-SP ÷ все выполненные SP квартала. Цель и коридор — из настроек (по умолч. 67% ±5пп)."
-          read="Зелёный ✓ = в коридоре. Оранжевый ⚠ = вышли за коридор, рядом на сколько пп. «Факт» = только закрытое, «по плану» = если закроют всё взятое."
-          plan="На старте квартала мало данных — процент скачет, это норма. К середине смотрите: если Product проседает — добавьте продуктовых задач в следующие спринты (подсказка ниже считает сколько)."
+          title="Доля Product за квартал"
+          :what="`Доля Product в закрытых SP квартала. Пример: закрыли 300 SP, Product 210 - доля 70%.`"
+          :read="`Зелёная рамка на полосе - цель ${bandLabel}, её задают в настройках. В начале квартала доля скачет, смотрите с середины.`"
         />
       </span>
-      <span :style="{ color: T.subtle }">· {{ sprintsLabel }}</span>
-      <span :style="{ color: T.subtle }">· {{ balance.totalPoints }} SP закрыто</span>
+      <span :style="{ color: T.subtle, whiteSpace: 'nowrap' }">{{ sprintsLabel }}</span>
       <span
-        :style="{ color: statusColor, fontWeight: 600 }"
-        :title="
-          balance.outOfBand
-            ? `Product ${productPct}% против цели ${targetPct}% — отклонение ${deltaLabel} процентных пунктов`
-            : `Product ${productPct}% — в пределах цели ${targetPct}% ±${bandPp}пп`
-        "
+        :style="{ color: statusColor, fontWeight: 600, whiteSpace: 'nowrap' }"
+        :title="`Product: ${fmt(balance.productPoints)} из ${fmt(balance.totalPoints)} закрытых SP квартала`"
       >
-        {{ showPlan ? 'факт ' : '' }}Product {{ productPct }}%
-        <template v-if="balance.outOfBand">⚠ на {{ deltaLabel }} от цели</template>
-        <template v-else>✓ в цели</template>
+        Product {{ fmt(productPct) }}%, цель {{ bandLabel }}
+        {{ balance.outOfBand ? '⚠' : '✓' }}
       </span>
       <span
         v-if="showPlan"
-        :style="{ color: planColor }"
-        :title="`Если закроют всё взятое в активный спринт (+${planExtraSp} SP ещё не Done), выйдет ${balance.plannedProductPct}% Product`"
+        :style="{ color: planColor, whiteSpace: 'nowrap' }"
+        :title="`Если закроют ещё ${fmt(planExtraSp)} SP активного спринта`"
       >
-        · по плану {{ balance.plannedProductPct }}%
-        <template v-if="balance.plannedOutOfBand">⚠</template>
-        <span :style="{ color: T.subtlest }">(ещё +{{ planExtraSp }} SP в работе)</span>
+        с активным спринтом {{ plannedPct }}%
       </span>
     </div>
 
@@ -116,7 +114,7 @@ const remaining = computed(() => props.balance.sprintsLeft);
           borderTopLeftRadius: '5px',
           borderBottomLeftRadius: '5px',
         }"
-        :title="`Product: ${balance.productPoints} SP (${productPct}%)`"
+        :title="`Product: ${fmt(balance.productPoints)} SP, ${fmt(productPct)}% закрытых SP квартала`"
       />
       <div
         :style="{
@@ -125,7 +123,7 @@ const remaining = computed(() => props.balance.sprintsLeft);
           borderTopRightRadius: '5px',
           borderBottomRightRadius: '5px',
         }"
-        :title="`Остальное (Tech+Support): ${balance.otherPoints} SP (${otherPct}%)`"
+        :title="`Tech, Support и без метки: ${fmt(balance.otherPoints)} SP, ${fmt(otherPct)}% закрытых SP квартала`"
       />
       <!-- коридор цели -->
       <div
@@ -139,7 +137,7 @@ const remaining = computed(() => props.balance.sprintsLeft);
           border: '1px dashed var(--ds-text-success, #4c6b1f)',
           boxSizing: 'border-box',
         }"
-        :title="`Допустимый коридор: ${targetPct - bandPp}–${targetPct + bandPp}%`"
+        :title="`Цель Product: ${bandLabel}`"
       />
       <!-- целевая линия -->
       <div
@@ -151,23 +149,19 @@ const remaining = computed(() => props.balance.sprintsLeft);
           width: '0',
           borderLeft: '2px solid var(--ds-text, #292a2e)',
         }"
-        :title="`Цель Product: ${targetPct}%`"
+        :title="`Середина цели: ${targetPct}%`"
       />
     </div>
 
-    <!-- Пояснение баланса -->
-    <div :style="{ marginTop: '5px', color: T.subtle }">
-      <template v-if="balance.outOfBand && debtAbs > 0 && remaining > 0">
-        Перекос в {{ skewDir }}: чтобы выйти на цель {{ targetPct }}%, нужно ≈
-        <b :style="{ color: T.danger }">{{ debtAbs }} SP</b>
-        {{ balance.deltaPp > 0 ? 'на Tech/Support' : 'на Product' }} в оставшихся {{ remaining }}
-        {{ remaining === 1 ? 'спринте' : 'спринтах' }}.
+    <!-- Что делать: только при выходе из цели -->
+    <div v-if="balance.outOfBand && debtAbs > 0" :style="{ marginTop: '5px', color: T.subtle }">
+      <template v-if="remaining > 0">
+        Чтобы вернуться к {{ targetPct }}%, возьмите ещё
+        <b :style="{ color: T.danger }">{{ fmt(debtAbs) }} SP</b>
+        {{ balance.deltaPp > 0 ? 'Tech и Support' : 'Product' }} за {{ remaining }}
+        {{ sprintsWord(remaining) }}.
       </template>
-      <template v-else-if="balance.outOfBand && debtAbs > 0">
-        Квартал завершается: перекос в {{ skewDir }} на {{ deltaLabel }} (цель {{ targetPct }}%).
-        Учесть в планировании следующего квартала.
-      </template>
-      <template v-else> Баланс в пределах цели ({{ targetPct }}% ±{{ bandPp }}%). </template>
+      <template v-else>Квартал закрывается вне цели: учтите в планах следующего.</template>
     </div>
   </div>
 </template>

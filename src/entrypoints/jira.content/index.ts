@@ -23,6 +23,8 @@ import {
   boardConfig,
   sprintHealthThresholds,
   readSprintCache,
+  readChangelogCache,
+  writeChangelogCache,
   writeSprintCache,
   quarterTarget,
   quarterUiMode,
@@ -224,13 +226,20 @@ export default defineContentScript({
           await readSprintCache(),
         );
         await writeSprintCache(res.fetched); // кеш по sprintId — пишем и для ушедшей доски
-        // Крупные задачи (≥ 13 SP) идут по два спринта — их SP разносим по времени работы.
+        // Задачи от 3 SP часто идут дольше спринта - их SP разносим по времени работы.
+        // История статусов закрытых задач - из постоянного кэша, из Jira только новые.
         const status = await statusConfig.getValue();
         const work = await getBigTaskWork(
           res.sprints,
           status.workStatuses,
           status.doneStatuses,
-        ).catch(() => new Map());
+          await readChangelogCache(),
+        )
+          .then(async (r) => {
+            await writeChangelogCache(r.fetchedClosed);
+            return r.work;
+          })
+          .catch(() => new Map());
         if (gen !== boardGen) return;
         // Отчёты приходят свежими первыми, модели нужна хронология.
         plan = planCapacity(
@@ -531,7 +540,7 @@ export default defineContentScript({
       if (!card.querySelector('.tlh-unlabeled-badge')) {
         const badge = document.createElement('span');
         badge.className = 'tlh-unlabeled-badge';
-        badge.textContent = 'без CAP-метки';
+        badge.textContent = 'нет метки Product, Tech или Support';
         Object.assign(badge.style, {
           position: 'absolute',
           top: '2px',

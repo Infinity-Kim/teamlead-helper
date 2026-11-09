@@ -15,7 +15,8 @@ import { levelStyle } from './health-tone';
  *
  * Три уровня: зелёный — в норме, жёлтый — за первым порогом, красный — за вторым (issue #18).
  * Одного порога не хватало: 11% и 60% переноса красились одинаково, и по чипам было не
- * понять, где «стоит обсудить», а где «надо разбираться». Пороги и цвета — в Options.
+ * понять, где «стоит обсудить», а где «надо разбираться». Пороги и цвета - в Options, в подсказке
+ * чипа их не повторяем.
  *
  * `no-data` / `insufficient-history` показываются серым прочерком — визуально отличимы от ok,
  * чтобы «данных нет» нельзя было принять за «всё хорошо».
@@ -40,55 +41,59 @@ const LABEL: Record<RuleId, string> = {
   punted: 'выброшено',
 };
 
-/** Уровень словами — первой строкой подсказки, чтобы цвет чипа не приходилось угадывать. */
+/** Уровень словами - последней строкой подсказки, чтобы цвет чипа не приходилось угадывать. */
 const LEVEL: Partial<Record<RuleStatus, string>> = {
-  ok: 'в норме',
-  warn: 'за первым порогом (жёлтый)',
-  crit: 'за вторым порогом (красный)',
+  ok: 'Зелёный: в норме.',
+  warn: 'Жёлтый: стоит обсудить на ретро.',
+  crit: 'Красный: надо разбираться.',
 };
 
-/** Развёрнутое пояснение для title (что именно значит число и с чем сравнили). */
+/** Подсказка чипа (title): число с тем, из чего оно, и уровень. До 2 строк. */
 function hint(r: RuleResult): string {
-  const detail = describe(r);
   const level = LEVEL[r.status];
-  return level ? `${detail}\nУровень: ${level}` : detail;
+  const tail = [level, clickable(r) ? 'Нажмите - покажем задачи.' : ''].filter(Boolean).join(' ');
+  return tail ? `${describe(r)}\n${tail}` : describe(r);
 }
 
 function describe(r: RuleResult): string {
   const pct = (v: number) => `${(v * 100).toFixed(0)}%`;
-  // «20% / 30%» — первый (жёлтый) и второй (красный).
-  const limits = `${pct(r.threshold)} / ${pct(r.critThreshold)}`;
+  const sp = r.evidence?.points ?? 0;
+  const n = r.evidence?.issueKeys.length ?? 0;
+  const name = LABEL[r.rule][0]!.toUpperCase() + LABEL[r.rule].slice(1);
   switch (r.status) {
     case 'insufficient-history':
-      return `${LABEL[r.rule]}: мало истории для сравнения (нужно больше закрытых спринтов)`;
+      return `${name}: не с чем сравнить, нужно 6 закрытых спринтов до этого.`;
     case 'no-data':
-      return `${LABEL[r.rule]}: Jira не отдала данные для этого правила`;
+      return `${name}: Jira не отдала данные.`;
     default:
       break;
   }
   switch (r.rule) {
-    case 'velocity-drop':
-      // Явно говорим «ПРЕДЫДУЩИХ, без этого спринта»: в шапке страницы медиана считается
-      // по последним 6 ВКЛЮЧАЯ текущий, и без уточнения два числа выглядят противоречиво.
-      return `Скорость ${r.value! > 0 ? 'ниже' : 'выше'} на ${pct(Math.abs(r.value!))} базы ${r.baseline} SP — это медиана 6 ПРЕДЫДУЩИХ спринтов (сам спринт в базу не входит, иначе он влиял бы на собственный порог). Пороги: не ниже −${pct(r.threshold)} / −${pct(r.critThreshold)}`;
+    case 'velocity-drop': {
+      // База - медиана 6 спринтов ДО этого, сам спринт в неё не входит: иначе он влиял бы на
+      // собственный порог. В шапке отчёта медиана по последним 6 вместе со свежим.
+      const base = r.baseline ?? 0;
+      const closed = Math.round(base * (1 - r.value!));
+      return `Скорость: закрыли ${closed} SP, обычно ${base} - на ${pct(Math.abs(r.value!))} ${r.value! > 0 ? 'меньше' : 'больше'}. Обычно - медиана 6 спринтов до этого.`;
+    }
     case 'carryover':
-      return `Перенесено ${pct(r.value!)} от взятого объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Пороги: не более ${limits}`;
+      return `Перенос: не закрыли ${sp} SP в ${n} задачах, это ${pct(r.value!)} объёма спринта к концу.`;
     case 'reestimate':
-      return `Оценки уже взятых задач выросли на ${pct(r.value!)} (+${r.evidence?.points ?? 0} SP). Пороги: не более ${limits}`;
+      return `Переоценка: оценки задач со старта выросли на ${sp} SP, это ${pct(r.value!)}. Снижение оценок не вычитаем.`;
     case 'scope-added':
-      return `Добавлено после старта ${pct(r.value!)} от объёма (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Пороги: не более ${limits}`;
+      return `Добавлено: после старта докинули ${sp} SP в ${n} задачах, это ${pct(r.value!)} от остального объёма.`;
     case 'punted':
-      return (r.evidence?.issueKeys.length ?? 0) === 0
-        ? 'Из спринта после старта ничего не выбрасывали'
-        : `Выброшено после старта ${pct(r.value!)} от объёма на старте (${r.evidence?.points ?? 0} SP, ${r.evidence?.issueKeys.length ?? 0} зад.). Жёлтый выше ${pct(r.threshold)}, красный от ${pct(r.critThreshold)}`;
+      return n === 0
+        ? 'Выброшено: после старта из спринта ничего не убирали.'
+        : `Выброшено: после старта убрали ${sp} SP в ${n} задачах, это ${pct(r.value!)} от взятого на старте.`;
   }
 }
 
-/** Компактное значение на чипе. */
+/** Компактное значение на чипе: у скорости «-12%» - закрыли меньше обычного, «+12%» - больше. */
 function display(r: RuleResult): string {
-  if (r.value === null) return '—';
+  if (r.value === null) return '-';
   const pct = Math.round(Math.abs(r.value) * 100);
-  if (r.rule === 'velocity-drop') return `${r.value > 0 ? '↓' : '↑'}${pct}%`;
+  if (r.rule === 'velocity-drop') return `${r.value > 0 ? '-' : '+'}${pct}%`;
   return `${pct}%`;
 }
 

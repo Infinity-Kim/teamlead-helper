@@ -16,6 +16,7 @@ import {
   PLAN_HISTORY,
   type BigTaskWork,
   type BucketPoints,
+  type StatusTransition,
 } from '@/core/metrics';
 import type {
   AgileSprintDto,
@@ -167,8 +168,8 @@ export interface QuarterSprints {
   sprints: SprintRecord[];
 }
 
-/** Полная история статусов задачи постранично (или [] при ошибке). */
-async function fetchAllStatusTransitions(issueKey: string) {
+/** Полная история статусов задачи постранично. null - запрос не удался (в кэш не пишем). */
+async function fetchAllStatusTransitions(issueKey: string): Promise<StatusTransition[] | null> {
   const values: NonNullable<GhChangelogPageDto['values']> = [];
   try {
     for (let startAt = 0; ;) {
@@ -180,35 +181,66 @@ async function fetchAllStatusTransitions(issueKey: string) {
       startAt += page.values.length;
     }
   } catch {
-    return [];
+    return null;
   }
   return statusTransitionsOf(values);
 }
 
+/** Время работы крупных задач + история статусов закрытых задач, скачанная в этот раз. */
+export interface BigTaskWorkResult {
+  work: Map<string, BigTaskWork>;
+  /** Только задачи, закрытые в одном из закрытых спринтов: их историю можно кэшировать навсегда. */
+  fetchedClosed: Map<string, StatusTransition[]>;
+}
+
 /**
  * Время работы над крупными задачами (≥ BIG_TASK_SP) спринтов, которые видит план
- * (последние PLAN_HISTORY отчётов, `reports` — от свежих к старым) — для разнесения их SP по
- * спринтам (sprintFlows). Крупных задач немного (≈ 1–2 на спринт), запрос на каждую.
- * Задачи без входа в рабочий статус в мапу не попадают — для них sprintFlows делит поровну.
+ * (последние PLAN_HISTORY отчётов, `reports` - от свежих к старым) - для разнесения их SP по
+ * спринтам (sprintFlows). При пороге 3 SP это 190-240 задач на доску за 19 спринтов.
+ * Закрытые задачи больше не меняются, поэтому их история статусов берётся из `cached`, а из Jira
+ * идут только новые закрытые и незакрытые (5-35 запросов). Новые закрытые возвращаются
+ * в `fetchedClosed` - вызывающий дописывает их в постоянный кэш.
+ * Задачи без входа в рабочий статус в мапу не попадают - для них sprintFlows делит поровну.
  */
 export async function getBigTaskWork(
   reports: readonly SprintReportDetail[],
   workStatuses: readonly string[],
   doneStatuses: readonly string[],
-): Promise<Map<string, BigTaskWork>> {
+  cached: ReadonlyMap<string, readonly StatusTransition[]> = new Map(),
+): Promise<BigTaskWorkResult> {
   const keys = new Set<string>();
+  const closed = new Set<string>();
   for (const r of reports.slice(0, PLAN_HISTORY + 1)) {
-    for (const i of [...r.completedIssues, ...r.notCompletedIssues]) {
+    for (const i of r.completedIssues) {
+      if ((i.points ?? 0) < BIG_TASK_SP) continue;
+      keys.add(i.key);
+      // Отчёты - только закрытых спринтов: задача из completedIssues закрыта окончательно.
+      if (r.state.toUpperCase() === 'CLOSED') closed.add(i.key);
+    }
+    for (const i of r.notCompletedIssues) {
       if ((i.points ?? 0) >= BIG_TASK_SP) keys.add(i.key);
     }
   }
-  const list = [...keys];
-  const works = await mapLimit(list, CHANGELOG_CONCURRENCY, async (key) =>
-    bigTaskWorkOf(await fetchAllStatusTransitions(key), workStatuses, doneStatuses),
-  );
-  const out = new Map<string, BigTaskWork>();
-  works.forEach((w, i) => w && out.set(list[i], w));
-  return out;
+  const fetchedClosed = new Map<string, StatusTransition[]>();
+  const transitions = new Map<string, readonly StatusTransition[]>();
+  const missing: string[] = [];
+  for (const key of keys) {
+    const hit = closed.has(key) ? cached.get(key) : undefined;
+    if (hit) transitions.set(key, hit);
+    else missing.push(key);
+  }
+  const loaded = await mapLimit(missing, CHANGELOG_CONCURRENCY, fetchAllStatusTransitions);
+  loaded.forEach((tr, i) => {
+    if (!tr) return;
+    transitions.set(missing[i], tr);
+    if (closed.has(missing[i])) fetchedClosed.set(missing[i], tr);
+  });
+  const work = new Map<string, BigTaskWork>();
+  for (const [key, tr] of transitions) {
+    const w = bigTaskWorkOf(tr, workStatuses, doneStatuses);
+    if (w) work.set(key, w);
+  }
+  return { work, fetchedClosed };
 }
 
 /**
